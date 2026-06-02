@@ -109,7 +109,17 @@ void CaseLogger::WriteIndex()
        << "it checks), `description` (why), `spec_ref` (where it is derived), the\n"
        << "request, and `expected` vs `actual`. The cases are the output of the axis\n"
        << "analysis in `docs/notch_contract_matrix_spec.md` (§2 axes, §3 counting\n"
-       << "criterion, §4 exact counts) — not ad hoc. Grouped by phase:\n";
+       << "criterion, §4 exact counts) — not ad hoc.\n\n"
+       << "**Who owns what (transport-selection cases).** A transport is *usable* only\n"
+       << "if it is allowed by the output's type (Comfy-owned), available on the server\n"
+       << "(server/GPU), and reachable by the client (the Notch client's deployment).\n"
+       << "The **client** computes that usable set and **requests** one transport (or a\n"
+       << "preference order); the server honors it only if usable, otherwise it\n"
+       << "hard-errors — never a silent downgrade. So \"client requests cuda → rejected\"\n"
+       << "means the client asked for cuda but cuda was ruled out by type, server, or\n"
+       << "reachability. \"Non-image output\" means the output type is not IMAGE (a mesh,\n"
+       << "audio, or file), which matters because cuda is image-only.\n\n"
+       << "Grouped by phase:\n";
 
     for (const char* phase : kPhases)
     {
