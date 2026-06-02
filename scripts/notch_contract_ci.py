@@ -177,7 +177,7 @@ def install_python_deps(
                 "torch",
                 "torchvision",
                 "torchaudio",
-                "--index-url",
+                "--extra-index-url",
                 torch_index_url,
             ],
             log_name="python-install.log",
@@ -204,6 +204,78 @@ def compile_cpp_client(runner: CommandRunner, extension_dir: Path, workdir: Path
     if not exe.exists():
         raise RunnerError("C++ compile check executable was not produced")
     runner.run([str(exe)], log_name="cpp-compile.log")
+
+
+class MockClientBuildError(RunnerError):
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+def find_mock_client_dir() -> Path:
+    # In the container the runner is baked at /runner with mock_client copied
+    # beside it; the action checkout is also mounted at /action. In local dev the
+    # source sits next to scripts/. Probe each in order.
+    candidates = []
+    env_root = os.environ.get("NOTCH_ACTION_ROOT")
+    if env_root:
+        candidates.append(Path(env_root) / "mock_client")
+    script_dir = Path(__file__).resolve().parent
+    candidates.append(script_dir / "mock_client")
+    candidates.append(script_dir.parent / "mock_client")
+    candidates.append(Path("/action") / "mock_client")
+    for candidate in candidates:
+        if (candidate / "CMakeLists.txt").is_file():
+            return candidate
+    raise MockClientBuildError(
+        "could not locate the mock_client source directory",
+        "harness_error",
+    )
+
+
+def build_mock_client(runner: CommandRunner, extension_dir: Path, workdir: Path) -> Path:
+    # The mock client links the checked-out client interface, so interface drift
+    # surfaces here as a build failure with a stable, contract-framed code.
+    source_dir = find_mock_client_dir()
+    client_dir = extension_dir / "cpp" / "notch_comfy_client"
+    build_dir = workdir / "cpp-build" / "notch_mock_client"
+    configure = runner.run(
+        [
+            "cmake",
+            "-S",
+            str(source_dir),
+            "-B",
+            str(build_dir),
+            f"-DNOTCH_COMFY_CLIENT_DIR={client_dir}",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-G",
+            "Ninja",
+        ],
+        log_name="mock-client-build.log",
+        check=False,
+    )
+    built = configure
+    if configure.returncode == 0:
+        built = runner.run(
+            ["cmake", "--build", str(build_dir), "--config", "Release"],
+            log_name="mock-client-build.log",
+            check=False,
+        )
+    if built.returncode != 0:
+        raise MockClientBuildError(
+            "mock client transport adapters are incompatible with the current notch_comfy_client interface",
+            "transport_interface_incompatible",
+        )
+    stub = build_dir / "notch_mock_stub_check"
+    if stub.exists():
+        runner.run([str(stub)], log_name="mock-client-build.log")
+    exe = build_dir / "notch_mock_client"
+    if not exe.exists():
+        raise MockClientBuildError(
+            "mock client executable was not produced",
+            "transport_interface_incompatible",
+        )
+    return exe
 
 
 def python_env_snapshot(runner: CommandRunner, python: Path, artifacts: Path) -> dict[str, Any]:
@@ -329,7 +401,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_COMFY_PORT)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--comfyui-flags", default="--disable-auto-launch")
-    parser.add_argument("--torch-index-url", default="https://download.pytorch.org/whl/cu121")
+    parser.add_argument("--torch-index-url", default="https://download.pytorch.org/whl/cu130")
     parser.add_argument("--install-torch", choices=["true", "false"], default="true")
     parser.add_argument("--expected-node-classes", default=",".join(NOTCH_NODE_CLASSES))
     return parser.parse_args()
@@ -440,16 +512,60 @@ def main() -> int:
         )
 
         if mode == "contract_matrix":
-            write_json(
-                artifacts / result_filename,
-                {
-                    "schema_version": 1,
-                    "result": "not_implemented",
-                    "implemented_checks": ["extension_initialization", "cpp_client_compile_check"],
-                    "missing_checks": ["live_http_ws_cuda_mock_client_permutation_suite"],
-                },
-            )
-            raise RunnerError("contract_matrix mode needs the CI mock client executable before it can claim a pass")
+            try:
+                mock_exe = build_mock_client(runner, extension_dir, workdir)
+            except MockClientBuildError as exc:
+                result["result"] = "fail"
+                result["setup_failure_code"] = exc.code
+                result["error"] = str(exc)
+                write_json(artifacts / result_filename, result)
+                return 1
+
+            fixtures = find_mock_client_dir() / "fixtures"
+            mock_command = [
+                str(mock_exe),
+                "--base-url",
+                base_url,
+                "--output-dir",
+                str(artifacts),
+                "--client-id",
+                "notch-contract-ci",
+            ]
+            # Supply discovery + readiness fixtures so the live run exercises the
+            # type-axis and deployment-readiness cases instead of skipping them.
+            fixture_flags = {
+                "--parse-workflow": fixtures / "parse_workflow.json",
+                "--required-files-ready": fixtures / "required_files_ready.json",
+                "--required-files-missing": fixtures / "required_files_missing.json",
+            }
+            for flag, path in fixture_flags.items():
+                if path.is_file():
+                    mock_command += [flag, str(path)]
+            run = runner.run(mock_command, log_name="mock-client.log", check=False)
+            # The mock client owns contract-matrix-result.json; read it back
+            # rather than overwriting its per-case totals.
+            matrix_result: dict[str, Any] = {}
+            matrix_path = artifacts / result_filename
+            if matrix_path.is_file():
+                try:
+                    matrix_result = json.loads(matrix_path.read_text(encoding="utf-8"))
+                except Exception:
+                    matrix_result = {}
+            passed = run.returncode == 0 and matrix_result.get("result") == "pass"
+            compatibility = {
+                "schema_version": 1,
+                "profile": mode,
+                "result": "pass" if passed else "fail",
+                "comfyui_ref": args.comfyui_ref,
+                "comfyui_commit": environment["comfyui_commit"],
+                "comfyui_notch_commit": environment["extension_commit"],
+                "runner": result["runner"],
+                "checks": {**result["checks"], "mock_client_built": True},
+                "contract_matrix": matrix_result.get("totals", {}),
+                "environment_snapshot_sha256": file_sha256(artifacts / "environment.json"),
+            }
+            write_json(artifacts / "compatibility-result.json", compatibility)
+            return 0 if passed else 1
 
         result["result"] = "pass"
         write_json(artifacts / result_filename, result)

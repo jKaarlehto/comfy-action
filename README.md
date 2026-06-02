@@ -87,7 +87,7 @@ checks on a floating branch.
 | `port` | `8188` | ComfyUI port inside the container. |
 | `timeout` | `180` | Seconds to wait for server startup. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `python main.py`. |
-| `torch_index_url` | `https://download.pytorch.org/whl/cu121` | PyTorch pip index. |
+| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch pip index (NVIDIA stable, used as `--extra-index-url`). |
 | `install_torch` | `true` | Install torch/torchvision/torchaudio before ComfyUI requirements. |
 | `use_gpu` | `auto` | `true`, `false`, or `auto`. `auto` probes `docker run --gpus all`. |
 | `docker_image` | `notch-contract-ci:local` | Local image tag. |

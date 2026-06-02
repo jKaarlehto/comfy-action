@@ -55,6 +55,7 @@ The container mounts:
 <caller workspace>       -> /workspace
 <action checkout>        -> /action:ro
 <caller artifact dir>    -> /artifacts
+<runner pip cache>       -> /cache/pip
 ```
 
 Everything else under `/work/notch-contract-ci` is run-owned container state and
@@ -72,8 +73,9 @@ CI product:
 - The self-hosted runner is trusted infrastructure. Docker gives environment
   repeatability and cleanup, but it is not a security boundary for untrusted
   workflows.
-- `contract_matrix` intentionally fails until the C++ mock client exists. The
-  action must not report a green matrix contract before that suite is real.
+- `contract_matrix` starts with discovery and negotiation only. Execution,
+  delivery, and CUDA IPC validation stay in later phases until the mock client
+  can prove those paths with real outputs.
 
 ## Goals
 
@@ -83,7 +85,8 @@ CI product:
 - Verify that `cpp/notch_comfy_client` compiles.
 - Record the Python, CUDA, Docker-host, ComfyUI, and extension facts needed to
   reproduce a successful or failed run.
-- In future `contract_matrix` mode, verify negotiation-axis positives and negatives.
+- In `contract_matrix` mode, verify negotiation-axis positives and negatives
+  with a C++ mock client linked against the vendored client interface.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
 ## Non-Goals
@@ -105,7 +108,7 @@ Keep configuration small:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_initialization` | `extension_initialization` runs the implemented boot/node/feature/client compile check. `contract_matrix` is reserved for the future mock-client permutation suite and currently fails after initialization. |
+| `mode` | `extension_initialization` | `extension_initialization` runs the boot/node/feature/client compile check. `contract_matrix` runs the same setup, then runs the C++ mock client's discovery and negotiation matrix. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository to clone inside the container. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
@@ -114,12 +117,13 @@ Keep configuration small:
 | `port` | `8188` | Local ComfyUI HTTP port inside the container. |
 | `timeout` | `180` | Seconds to wait for ComfyUI to become reachable. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `main.py`. |
-| `torch_index_url` | `https://download.pytorch.org/whl/cu121` | PyTorch pip index URL used inside the container. |
+| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch pip index URL used inside the container (NVIDIA stable per the ComfyUI manual-install spec; passed as `--extra-index-url`). |
 | `install_torch` | `true` | Install Torch before ComfyUI requirements. |
 | `use_gpu` | `auto` | `true`, `false`, or `auto`. `auto` probes `docker run --gpus all`. |
 | `docker_image` | `notch-contract-ci:local` | Local Docker image tag for the runner. |
 | `docker_no_cache` | `false` | Build the image with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Simple path under the caller workspace. Cleared at the start of each run. |
+| `pip_cache_dir` | `notch-contract-pip-cache` | Simple path under the self-hosted runner workspace mounted as `/cache/pip`. Shared by both jobs on the same runner so the matrix job can reuse downloaded wheels. |
 | `upload_artifacts` | `true` | Upload `artifact_dir` with `actions/upload-artifact`. |
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-initialization expectation. |
 
@@ -171,24 +175,94 @@ workflow execution correctness.
 
 ## Contract Matrix Mode
 
-Contract matrix mode is planned, not implemented in the first Docker action. The
-current `contract_matrix` mode runs extension-initialization setup, writes a
-`contract-matrix-result.json` with `result: "not_implemented"`, and fails instead
-of claiming a pass.
-
-The future matrix client should be a lightweight C++ executable built
-during the run. It links the vendored
-`ComfyUI-Notch/cpp/notch_comfy_client` source and provides only test transports:
+Contract matrix mode uses a lightweight C++ mock Notch client built during the
+run. The executable lives in this action repo, links the checked-out
+`ComfyUI-Notch/cpp/notch_comfy_client` source, and provides only the transport
+adapters and orchestration needed by CI:
 
 - HTTP requests to `/notch/parse`, `/notch/inject`, and artifact GET routes.
 - WebSocket reads for Comfy execution lifecycle, `notch-output-ready`, and
   `notch-cuda-share-status`.
-- Optional CUDA Driver IPC import for CUDA-positive cases.
+- Optional CUDA Driver IPC import for future CUDA-positive execution cases.
 - Local output validation and artifact writing for CI evidence.
 
 Keep this mock client in the action/test harness, not in
 `cpp/notch_comfy_client`. The client interface remains bring-your-own-transport;
 the mock client is one consumer used by CI.
+
+The important boundary is that the mock client is a consumer of
+`notch_client_interface`, not a second protocol implementation. It must:
+
+1. Build `/notch/parse` requests with `ClientProtocol::BuildWorkflowDiscoveryRequest`.
+2. Parse server feature facts with `ParseServerCompatibilityFacts` and
+   `ParseServerDeploymentFacts`.
+3. Parse workflow contracts with `ParseWorkflowContract`.
+4. Select transports with `SelectOutputTransport`.
+5. Use `BuildWorkflowSubmissionRequest` and `ParseWorkflowSubmissionResponse`
+   when execution-mode cases are added.
+6. Parse WebSocket text through `ParseWebSocketEvent`,
+   `ParseCudaShareStatusEvent`, and `ParseOutputReadyEvent` when execution-mode
+   cases are added.
+
+The mock client should provide small concrete transport adapters:
+
+- `LocalHttpTransport`: sends local HTTP/1.1 requests to the ComfyUI server and
+  writes sanitized request/response records to `http.jsonl`.
+- `LocalWebSocketTransport`: connects to `/ws?clientId=<case-client-id>`,
+  performs the local WebSocket handshake, supports text send, records received
+  text frames to `websocket.jsonl`, and is sufficient for later execution cases.
+- `CaseLogger`: writes `mock-client.jsonl`, case summaries, and stable failure
+  codes. It should favor readable records over clever abstractions.
+
+**Transport dependency.** Use [IXWebSocket](https://github.com/machinezone/IXWebSocket)
+as the single third-party transport library, pulled in by CMake `FetchContent`
+and built with `USE_TLS=OFF` and `USE_ZLIB=OFF`. One dependency provides both
+`ix::HttpClient` (for `LocalHttpTransport`) and `ix::WebSocket` (for
+`LocalWebSocketTransport`), which keeps the adapter source small and the CMake
+surface to a single fetch. Local CI talks plain `http://` and `ws://`, so no
+OpenSSL/TLS stack is needed. Header-only HTTP clients such as `cpp-httplib` were
+considered, but they cover only HTTP and would force a second WebSocket
+dependency; a single library that does both keeps the harness terser.
+
+Confine the third-party transports to the adapter translation units. The matrix
+orchestration (`matrix.{h,cpp}`) depends only on `notch_comfy_client` and the
+abstract `IHttpTransport` / `IWebSocketProbe` interfaces, so the contract logic
+stays library-agnostic and compile-checkable with a stub transport
+(`tests/stub_check.cpp`).
+
+Because the mock client links the checked-out `cpp/notch_comfy_client` source,
+interface drift in `ComfyUI-Notch` can make the action's `LocalHttpTransport`
+and `LocalWebSocketTransport` adapters stop conforming to the current
+`IHttpTransport` / `IWebSocketTransport` contracts. This is the most likely way
+a green action turns red after an otherwise unrelated extension change, so it
+must fail loudly, not cryptically:
+
+- **Build-time conformance.** Building the mock client is a separate, logged
+  step. Capture the full compiler/linker output to `mock-client-build.log`. When
+  the adapters fail to compile or link against the current interface (changed
+  `Send`/`SendText` signature, a new pure-virtual method, a renamed
+  request/response field), the run must stop with the stable code
+  `transport_interface_incompatible` and surface the first diagnostic lines in
+  `contract-matrix-result.json`, instead of letting a raw CMake error abort the
+  job with no contract framing.
+- **Startup version facts.** On every run the mock client logs
+  `ClientProtocol::GetClientCompatibilityFacts()` — client interface version,
+  source git commit/tag, wire-protocol version, and minimum server wire-protocol
+  version — as the first record in `mock-client.jsonl` and into
+  `environment.json`. A linked-against interface that disagrees with the
+  checked-out `extension_ref` is then diagnosable from artifacts alone, without
+  replaying the run.
+
+Treat `transport_interface_incompatible` as a shared-setup failure, not a
+per-case `fail`: like a server that cannot start or a client that cannot
+compile, it aborts the matrix before any case runs (see Contract Matrix
+Execution Model).
+
+Matrix v1 uses the real HTTP transport and the interface parsers for `/features`
+and `/notch/parse`. It also performs a WebSocket handshake smoke case so the
+transport is not dead code. It does not submit `/notch/inject` yet. Matrix v2
+will reuse the same transports for execution, output-ready events, artifact
+fetch, and CUDA share-status validation.
 
 The suite tests three negotiation axes:
 
@@ -197,6 +271,19 @@ The suite tests three negotiation axes:
 - **Server availability axis:** `extension.notch.output_transports` and related
   server facts from Comfy feature flags.
 - **Client reachability axis:** local facts supplied by the test client.
+
+Beyond transport selection, the suite also exercises a **deployment-readiness
+gate** (orthogonal to the three transport axes): `POST /notch/get-required-files`
+reports each referenced input file's `exists` flag, and the intended contract is
+that a missing required file blocks the run. Server enforcement of that block is
+not yet built, so the gate is asserted ahead of the extension and a live failure
+flags the gap to fix.
+
+The canonical case set — every axis, its components, the boundary counting
+criterion, the exact counts (Layer 1 = 18, full v2 = 31), the growth rules, and
+the spec→`mock_client` generation mapping — lives in
+`docs/notch_contract_matrix_spec.md`. Treat that document as the source of truth
+for the matrix; the tables below are worked examples derived from it.
 
 Output target is not a negotiation axis. It is the Notch-side decision about
 what to do with a delivered output after the client-extension transport contract
@@ -256,7 +343,8 @@ Pure selection matrix, using a hard requested transport:
 | non-image disk local | `disk,http` | `disk,http` | `disk,http` | `disk` | `disk,http` | choose `disk` |
 | non-image rejects unreachable disk | `disk,http` | `disk,http` | `http` | `disk` | `http` | reject requested `disk` |
 | file path HTTP-only client | `disk,http` | `disk,http` | `http` | `http` | `http` | choose `http` |
-| image rejects unavailable CUDA | `cuda,disk,http` | `disk,http` | `cuda,disk,http` | `cuda` | `disk,http` | reject requested `cuda` |
+| image rejects CUDA by server | `cuda,disk,http` | `disk,http` | `cuda,disk,http` | `cuda` | `disk,http` | reject: server has no GPU |
+| image rejects CUDA by client | `cuda,disk,http` | `cuda,disk,http` | `http` | `cuda` | `http` | reject: client not local |
 | empty intersection fails | `disk,http` | `cuda` | `cuda` | `cuda` | empty | reject: no usable transport |
 
 Pure selection matrix, using a soft preference order:
@@ -281,16 +369,17 @@ and filesystem mounts add their own failure modes.
 The matrix runner must be diagnostic first: it should complete the full case
 list and report every failure in one run. A single broken case must not abort the
 remaining cases unless the shared setup itself failed (server cannot start,
-client cannot compile, `/features` is unreachable, or `/object_info` is missing
-required node classes).
+client cannot compile, the transport adapters are incompatible with the current
+interface, `/features` is unreachable, or `/object_info` is missing required
+node classes).
 
 Use two implementation phases:
 
-1. **Matrix v1: discovery and selection.** Use live `/features` and
-   `/notch/parse` responses plus the C++ client's transport-selection helper.
-   Do not queue workflow execution yet. This verifies that the extension's
-   advertised workflow/type axis, server deployment facts, and client
-   reachability negotiation agree.
+1. **Matrix v1: discovery and selection.** Build and run the C++ mock client.
+   Use live `/features` and `/notch/parse` responses plus the C++ client's
+   transport-selection helper. Do not queue workflow execution yet. This
+   verifies that the extension's advertised workflow/type axis, server
+   deployment facts, and client reachability negotiation agree.
 2. **Matrix v2: execution and delivery.** Add `/notch/inject`, WebSocket
    lifecycle capture, disk output validation, HTTP artifact fetch validation,
    CUDA share-status validation, and optional CUDA IPC import when the runner
@@ -408,6 +497,9 @@ Failure categories should be stable strings so reports can be grouped:
 - `output_hash_mismatch`
 - `cuda_status_missing`
 - `cuda_import_failed`
+- `deployment_readiness_mismatch`
+- `required_files_parse_error`
+- `transport_interface_incompatible`
 - `harness_error`
 
 ## Artifacts
@@ -426,6 +518,7 @@ git.log
 python-install.log
 environment.log
 cpp-compile.log
+mock-client-build.log
 extension-initialization-result.json
 contract-matrix-result.json
 compatibility-result.json
@@ -495,8 +588,9 @@ Clean every run:
 Safe to cache or reuse:
 
 - Docker image layers.
-- Pip wheel/download cache in a later phase, if the workflow records exact
-  package manifests and the cache key includes the relevant lock inputs.
+- Pip wheel/download cache mounted at `/cache/pip`. The virtual environment is
+  still rebuilt every run; only package downloads are reused. `pip-freeze.txt`
+  and `python-env.json` record the exact installed environment.
 - Optional model cache for future non-initialization tests, but not the phase-1
   extension-initialization check.
 
@@ -536,7 +630,7 @@ Suggested content:
   "environment_snapshot_sha256": "<hash>",
   "runner_summary": {
     "os": "Linux",
-    "python": "3.12.x",
+    "python": "3.13.x",
     "torch": "<version>",
     "cuda_available": false
   },
@@ -556,8 +650,7 @@ Promotion rules:
 
 ## Future Phases
 
-1. Add the C++ mock client for `/notch/parse`, `/notch/inject`, WebSocket
-   completion, HTTP output fetch, and CUDA import.
+1. Add `/notch/inject` execution cases to the C++ mock client.
 2. Add model-free execution tests.
 3. Add disk and HTTP output artifact tests.
 4. Add CUDA delivery tests when the runner can pass `--gpus all`.

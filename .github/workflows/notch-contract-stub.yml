@@ -1,0 +1,57 @@
+name: Notch Contract Matrix (stub self-test)
+
+# Layer-1 gate: compiles the transport-agnostic matrix against the *current*
+# notch_comfy_client interface and runs the stub self-test. No Docker, no GPU,
+# no IXWebSocket, no network — just g++ and the vendored interface source. This
+# is the cheap "testable middle": it proves the contract logic and the C++
+# interface link before the heavy self-hosted contract_matrix job runs.
+
+on:
+  push:
+    paths:
+      - 'mock_client/**'
+      - '.github/workflows/notch-contract-stub.yml'
+  workflow_dispatch:
+    inputs:
+      extension_repository:
+        description: 'ComfyUI-Notch repository providing cpp/notch_comfy_client'
+        required: false
+        # TODO: confirm the exact repo slug for ComfyUI-Notch.
+        default: 'jKaarlehto/ComfyUI-Notch'
+      extension_ref:
+        description: 'ComfyUI-Notch ref (tag/branch/commit)'
+        required: false
+        default: ''
+
+jobs:
+  stub:
+    name: Matrix stub self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@v4
+
+      - name: Checkout ComfyUI-Notch (interface source)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.extension_repository || 'jKaarlehto/ComfyUI-Notch' }}
+          ref: ${{ github.event.inputs.extension_ref || '' }}
+          path: _ext
+
+      - name: Compile and run the matrix stub self-test
+        run: |
+          set -euo pipefail
+          IFACE="$GITHUB_WORKSPACE/_ext/cpp/notch_comfy_client"
+          if [ ! -f "$IFACE/CMakeLists.txt" ]; then
+            echo "interface source not found at $IFACE" >&2
+            exit 1
+          fi
+          g++ -std=c++11 -Wall -Wextra \
+            -I "$IFACE/include" -I "$IFACE/third_party/jsonxx" -I mock_client/src \
+            mock_client/tests/stub_check.cpp \
+            mock_client/src/matrix.cpp \
+            mock_client/src/case_logger.cpp \
+            "$IFACE/src/client_interface.cpp" \
+            "$IFACE/third_party/jsonxx/jsonxx.cc" \
+            -o notch_mock_stub_check
+          ./notch_mock_stub_check

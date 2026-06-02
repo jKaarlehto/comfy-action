@@ -1,0 +1,6 @@
+{
+  "loader": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "notch_ci_absent_model.safetensors" }
+  }
+}

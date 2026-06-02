@@ -41,7 +41,7 @@ inputs:
   torch_index_url:
     description: "PyTorch pip index URL used inside the container."
     required: false
-    default: "https://download.pytorch.org/whl/cu121"
+    default: "https://download.pytorch.org/whl/cu130"
   install_torch:
     description: "Install torch/torchvision/torchaudio before ComfyUI requirements."
     required: false
