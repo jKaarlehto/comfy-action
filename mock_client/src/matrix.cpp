@@ -68,6 +68,8 @@ std::string ExpectJson(bool ok, const std::string& transport)
 struct SelectionRow
 {
     std::string id;
+    std::string title;
+    std::string description;
     std::string typeAllowed;
     std::string serverAvailable;
     std::string clientReachable;
@@ -82,26 +84,57 @@ struct SelectionRow
 // isolated to one axis per row, so server-unavailable (no GPU) and
 // client-unreachable (remote) cuda rejections are distinct cases.
 const SelectionRow kHardRows[] = {
-    {"image-cuda-local", "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", true, "cuda"},
-    {"image-disk-without-cuda", "cuda,disk,http", "disk,http", "disk,http", "disk", true, "disk"},
-    {"image-http-only-client", "cuda,disk,http", "disk,http", "http", "http", true, "http"},
-    {"nonimage-rejects-cuda-by-type", "disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", false, ""},
-    {"nonimage-disk-local", "disk,http", "disk,http", "disk,http", "disk", true, "disk"},
-    {"nonimage-rejects-unreachable-disk", "disk,http", "disk,http", "http", "disk", false, ""},
-    {"filepath-http-only-client", "disk,http", "disk,http", "http", "http", true, "http"},
-    {"image-rejects-cuda-by-server", "cuda,disk,http", "disk,http", "cuda,disk,http", "cuda", false, ""},
-    {"image-rejects-cuda-by-client", "cuda,disk,http", "cuda,disk,http", "http", "cuda", false, ""},
-    {"empty-intersection-fails", "disk,http", "cuda", "cuda", "cuda", false, ""},
+    {"image-cuda-local", "IMAGE, local client requiring cuda -> cuda chosen",
+     "Image allows cuda, server has a CUDA device, client is local: required cuda is usable and chosen.",
+     "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", true, "cuda"},
+    {"image-disk-without-cuda", "IMAGE, no server CUDA, requiring disk -> disk chosen",
+     "Server has no CUDA; a required disk transport is type-allowed, available, and reachable, so it is chosen.",
+     "cuda,disk,http", "disk,http", "disk,http", "disk", true, "disk"},
+    {"image-http-only-client", "IMAGE, http-only client requiring http -> http chosen",
+     "Remote http-only client: http is the only usable transport and the required http is chosen.",
+     "cuda,disk,http", "disk,http", "http", "http", true, "http"},
+    {"nonimage-rejects-cuda-by-type", "Non-image requiring cuda -> rejected by type",
+     "cuda is not type-allowed for a non-image output, so a required cuda is rejected (no silent downgrade).",
+     "disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", false, ""},
+    {"nonimage-disk-local", "Non-image, local client requiring disk -> disk chosen",
+     "disk is type-allowed, server-available, and client-reachable; the required disk is chosen.",
+     "disk,http", "disk,http", "disk,http", "disk", true, "disk"},
+    {"nonimage-rejects-unreachable-disk", "Non-image requiring disk on http-only client -> rejected",
+     "disk is not client-reachable from a remote http-only client, so the required disk is rejected (no downgrade).",
+     "disk,http", "disk,http", "http", "disk", false, ""},
+    {"filepath-http-only-client", "File path, http-only client requiring http -> http chosen",
+     "Non-image file path: http is the only usable transport and the required http is chosen.",
+     "disk,http", "disk,http", "http", "http", true, "http"},
+    {"image-rejects-cuda-by-server", "IMAGE requiring cuda with no server CUDA -> rejected",
+     "Server has no CUDA device, so a required cuda is not server-available and is rejected (no downgrade).",
+     "cuda,disk,http", "disk,http", "cuda,disk,http", "cuda", false, ""},
+    {"image-rejects-cuda-by-client", "IMAGE requiring cuda from a remote client -> rejected",
+     "Client is not local (http-only), so a required cuda is not client-reachable and is rejected (no downgrade).",
+     "cuda,disk,http", "cuda,disk,http", "http", "cuda", false, ""},
+    {"empty-intersection-fails", "No transport type-allowed, available, and reachable -> rejected",
+     "The three eligibility sets do not intersect, so selection fails: no usable transport.",
+     "disk,http", "cuda", "cuda", "cuda", false, ""},
 };
 
 const SelectionRow kSoftRows[] = {
-    {"prefer-cuda-then-disk", "cuda,disk,http", "disk,http", "disk,http", "cuda,disk,http", true, "disk"},
-    {"no-order-match-but-usable", "disk,http", "disk,http", "http", "cuda,disk", true, "http"},
+    {"prefer-cuda-then-disk", "Preference cuda->disk->http with cuda unusable -> disk chosen",
+     "Soft preference: the first usable transport in the order wins; cuda is not usable so disk is chosen.",
+     "cuda,disk,http", "disk,http", "disk,http", "cuda,disk,http", true, "disk"},
+    {"no-order-match-but-usable", "Preference cuda->disk with neither usable, http remains -> http chosen",
+     "No preferred transport is usable, so the helper falls back to the first usable transport (http).",
+     "disk,http", "disk,http", "http", "cuda,disk", true, "http"},
 };
+
+const char* const kSpecHard = "notch_contract_matrix_spec.md §4 hard selection (A1 n A2 n A3, hard request)";
+const char* const kSpecSoft = "notch_contract_matrix_spec.md §4 soft selection (A4 preference order)";
+const char* const kSpecTypeAxis = "notch_contract_matrix_spec.md §4 type-axis discovery (A1)";
+const char* const kSpecReadiness = "notch_contract_matrix_spec.md §4 deployment-readiness decision (A5)";
+const char* const kSpecLiveness = "notch_contract_matrix_spec.md §4 setup/liveness (A0)";
 
 } // namespace
 
-// Records one case result, updates the running totals, and writes evidence.
+// Records one case result, stamps its index, updates the running totals, and
+// writes the self-describing evidence.
 class CaseRecorder
 {
 public:
@@ -110,20 +143,14 @@ public:
     {
     }
 
-    void Record(
-        const std::string& caseId,
-        const std::string& phase,
-        const std::string& result,
-        const std::string& expectedJson,
-        const std::string& actualJson,
-        const std::vector<std::string>& errors)
+    void Record(CaseRecord record)
     {
-        ++m_index;
-        if (result == "pass") ++m_summary.passed;
-        else if (result == "fail") ++m_summary.failed;
-        else if (result == "skip") ++m_summary.skipped;
+        record.index = ++m_index;
+        if (record.result == "pass") ++m_summary.passed;
+        else if (record.result == "fail") ++m_summary.failed;
+        else if (record.result == "skip") ++m_summary.skipped;
         else ++m_summary.errored;
-        m_logger.WriteCase(m_index, caseId, phase, result, expectedJson, actualJson, errors);
+        m_logger.WriteCase(record);
     }
 
 private:
@@ -153,18 +180,29 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
     notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(options);
 
     bool ok = choice.m_ok == row.expectOk && (!row.expectOk || choice.m_transport == row.expectTransport);
-    std::vector<std::string> errors;
+
+    CaseRecord rec;
+    rec.caseId = row.id;
+    rec.title = row.title;
+    rec.phase = "transport-selection";
+    rec.description = row.description;
+    rec.specRef = soft ? kSpecSoft : kSpecHard;
+    if (soft)
+    {
+        rec.preferredOrder = Split(row.requestedOrOrder);
+    }
+    else
+    {
+        rec.requestedTransport = row.requestedOrOrder;
+    }
+    rec.expectedJson = ExpectJson(row.expectOk, row.expectTransport);
+    rec.actualJson = ChoiceJson(choice);
+    rec.result = ok ? "pass" : "fail";
     if (!ok)
     {
-        errors.push_back("transport_selection_mismatch");
+        rec.errors.push_back("transport_selection_mismatch");
     }
-    recorder.Record(
-        row.id,
-        soft ? "selection_soft" : "selection_hard",
-        ok ? "pass" : "fail",
-        ExpectJson(row.expectOk, row.expectTransport),
-        ChoiceJson(choice),
-        errors);
+    recorder.Record(rec);
 }
 
 // Deployment-readiness decision (Layer 1, no execution): POST
@@ -178,25 +216,36 @@ void RunReadinessCase(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
     const std::string& caseId,
+    const std::string& title,
+    const std::string& description,
     const std::string& workflowJson,
     bool expectReady)
 {
+    CaseRecord rec;
+    rec.caseId = caseId;
+    rec.title = title;
+    rec.phase = "readiness";
+    rec.description = description;
+    rec.specRef = kSpecReadiness;
+
     notch_comfy::HttpResponse response;
     std::string sendError;
     if (!http.Send(ClientProtocol::BuildRequiredFilesRequest(workflowJson), response, sendError))
     {
-        recorder.Record(caseId, "readiness", "error", "null",
-            "{\"error\":" + CaseLogger::Quote(sendError) + "}",
-            std::vector<std::string>{"harness_error"});
+        rec.result = "error";
+        rec.actualJson = "{\"error\":" + CaseLogger::Quote(sendError) + "}";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
         return;
     }
     std::vector<notch_comfy::RequiredFile> files;
     std::string parseError;
     if (!ClientProtocol::ParseRequiredFilesResponse(response.m_body, files, parseError))
     {
-        recorder.Record(caseId, "readiness", "error", "null",
-            "{\"error\":" + CaseLogger::Quote(parseError) + "}",
-            std::vector<std::string>{"required_files_parse_error"});
+        rec.result = "error";
+        rec.actualJson = "{\"error\":" + CaseLogger::Quote(parseError) + "}";
+        rec.errors.push_back("required_files_parse_error");
+        recorder.Record(rec);
         return;
     }
     int missing = 0;
@@ -209,19 +258,18 @@ void RunReadinessCase(
     }
     const bool ready = missing == 0;
     const bool ok = ready == expectReady;
-    std::vector<std::string> errors;
-    if (!ok)
-    {
-        errors.push_back("deployment_readiness_mismatch");
-    }
     std::ostringstream actual;
     actual << "{\"ready\":" << CaseLogger::Bool(ready)
            << ",\"missing_files\":" << missing
            << ",\"client_would_block\":" << CaseLogger::Bool(!ready) << "}";
-    recorder.Record(
-        caseId, "readiness", ok ? "pass" : "fail",
-        "{\"ready\":" + std::string(expectReady ? "true" : "false") + "}",
-        actual.str(), errors);
+    rec.expectedJson = "{\"ready\":" + std::string(expectReady ? "true" : "false") + "}";
+    rec.actualJson = actual.str();
+    rec.result = ok ? "pass" : "fail";
+    if (!ok)
+    {
+        rec.errors.push_back("deployment_readiness_mismatch");
+    }
+    recorder.Record(rec);
 }
 
 void WriteResultFile(const std::string& outputRoot, const MatrixSummary& summary)
@@ -244,7 +292,7 @@ void WriteResultFile(const std::string& outputRoot, const MatrixSummary& summary
     json << "}";
 
     std::ofstream stream(outputRoot + "/contract-matrix-result.json");
-    stream << json.str() << "\n";
+    stream << CaseLogger::PrettyPrint(json.str()) << "\n";
 }
 
 } // namespace
@@ -307,28 +355,38 @@ MatrixSummary RunMatrixV1(
     // 3. Server wire-protocol compatibility.
     notch_comfy::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
     {
-        std::vector<std::string> errors;
-        if (!compat.m_ok)
-        {
-            errors.push_back("server_feature_mismatch");
-        }
         std::ostringstream actual;
         actual << "{\"ok\":" << CaseLogger::Bool(compat.m_ok)
                << ",\"client_too_old\":" << CaseLogger::Bool(compat.m_clientTooOld)
                << ",\"server_too_old\":" << CaseLogger::Bool(compat.m_serverTooOld) << "}";
-        recorder.Record(
-            "server-wire-compatibility", "discovery",
-            compat.m_ok ? "pass" : "fail",
-            "{\"ok\":true}", actual.str(), errors);
+        CaseRecord rec;
+        rec.caseId = "server-wire-compatibility";
+        rec.title = "Server wire-protocol version is compatible with the client";
+        rec.phase = "liveness";
+        rec.description = "CheckServerCompatibility over live /features facts: neither the client nor the server is too old.";
+        rec.specRef = kSpecLiveness;
+        rec.expectedJson = "{\"ok\":true}";
+        rec.actualJson = actual.str();
+        rec.result = compat.m_ok ? "pass" : "fail";
+        if (!compat.m_ok)
+        {
+            rec.errors.push_back("server_feature_mismatch");
+        }
+        recorder.Record(rec);
     }
 
     // 4. Live /notch/parse type-axis assertions, when a workflow fixture exists.
     if (options.parseWorkflowJson.empty())
     {
-        recorder.Record(
-            "parse-type-axis", "discovery", "skip",
-            "null", "{\"reason\":\"no_parse_workflow\"}",
-            std::vector<std::string>());
+        CaseRecord rec;
+        rec.caseId = "parse-type-axis";
+        rec.title = "Type-axis discovery skipped (no parse workflow fixture)";
+        rec.phase = "discovery";
+        rec.description = "No /notch/parse workflow fixture was supplied, so the output type->transport axis was not exercised live.";
+        rec.specRef = kSpecTypeAxis;
+        rec.actualJson = "{\"reason\":\"no_parse_workflow\"}";
+        rec.result = "skip";
+        recorder.Record(rec);
     }
     else
     {
@@ -336,10 +394,16 @@ MatrixSummary RunMatrixV1(
         std::string sendError;
         if (!http.Send(ClientProtocol::BuildWorkflowDiscoveryRequest(options.parseWorkflowJson), parseResponse, sendError))
         {
-            recorder.Record(
-                "parse-type-axis", "discovery", "error",
-                "null", "{\"error\":" + CaseLogger::Quote(sendError) + "}",
-                std::vector<std::string>{"harness_error"});
+            CaseRecord rec;
+            rec.caseId = "parse-type-axis";
+            rec.title = "Type-axis discovery failed: /notch/parse request error";
+            rec.phase = "discovery";
+            rec.description = "The HTTP transport could not deliver the /notch/parse request.";
+            rec.specRef = kSpecTypeAxis;
+            rec.actualJson = "{\"error\":" + CaseLogger::Quote(sendError) + "}";
+            rec.result = "error";
+            rec.errors.push_back("harness_error");
+            recorder.Record(rec);
         }
         else
         {
@@ -347,10 +411,16 @@ MatrixSummary RunMatrixV1(
             std::string contractError;
             if (!ClientProtocol::ParseWorkflowContract(parseResponse.m_body, contract, contractError))
             {
-                recorder.Record(
-                    "parse-type-axis", "discovery", "error",
-                    "null", "{\"error\":" + CaseLogger::Quote(contractError) + "}",
-                    std::vector<std::string>{"parse_contract_mismatch"});
+                CaseRecord rec;
+                rec.caseId = "parse-type-axis";
+                rec.title = "Type-axis discovery failed: /notch/parse contract did not parse";
+                rec.phase = "discovery";
+                rec.description = "The /notch/parse response could not be parsed into a workflow contract.";
+                rec.specRef = kSpecTypeAxis;
+                rec.actualJson = "{\"error\":" + CaseLogger::Quote(contractError) + "}";
+                rec.result = "error";
+                rec.errors.push_back("parse_contract_mismatch");
+                recorder.Record(rec);
             }
             else
             {
@@ -359,18 +429,21 @@ MatrixSummary RunMatrixV1(
                     const notch_comfy::ContractOutput& output = contract.m_outputs[i];
                     std::vector<std::string> expected = ExpectedTypeTransports(output.m_type);
                     bool ok = Sorted(expected) == Sorted(output.m_transports);
-                    std::vector<std::string> errors;
+
+                    CaseRecord rec;
+                    rec.caseId = "parse-output-" + output.m_name;
+                    rec.title = "Output '" + output.m_name + "' (" + output.m_type + ") reports its type-allowed transports";
+                    rec.phase = "discovery";
+                    rec.description = "/notch/parse must report the type->transport set for this connected output (the type-allowed axis, from OUTPUT_TYPES_BY_TRANSPORT).";
+                    rec.specRef = kSpecTypeAxis;
+                    rec.expectedJson = "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(expected) + "}";
+                    rec.actualJson = "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(output.m_transports) + "}";
+                    rec.result = ok ? "pass" : "fail";
                     if (!ok)
                     {
-                        errors.push_back("parse_contract_mismatch");
+                        rec.errors.push_back("parse_contract_mismatch");
                     }
-                    recorder.Record(
-                        "parse-output-" + output.m_name,
-                        "discovery",
-                        ok ? "pass" : "fail",
-                        "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(expected) + "}",
-                        "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(output.m_transports) + "}",
-                        errors);
+                    recorder.Record(rec);
                 }
             }
         }
@@ -379,20 +452,31 @@ MatrixSummary RunMatrixV1(
     // 4b. Deployment-readiness gate (required input files reachable on server).
     if (options.requiredFilesReadyJson.empty() && options.requiredFilesMissingJson.empty())
     {
-        recorder.Record(
-            "deployment-readiness", "readiness", "skip", "null",
-            "{\"reason\":\"no_required_files_fixture\"}",
-            std::vector<std::string>());
+        CaseRecord rec;
+        rec.caseId = "deployment-readiness";
+        rec.title = "Deployment-readiness skipped (no required-files fixture)";
+        rec.phase = "readiness";
+        rec.description = "No required-files workflow fixture was supplied, so the deployment-readiness gate was not exercised live.";
+        rec.specRef = kSpecReadiness;
+        rec.actualJson = "{\"reason\":\"no_required_files_fixture\"}";
+        rec.result = "skip";
+        recorder.Record(rec);
     }
     else
     {
         if (!options.requiredFilesReadyJson.empty())
         {
-            RunReadinessCase(recorder, http, "deployment-ready", options.requiredFilesReadyJson, true);
+            RunReadinessCase(recorder, http, "deployment-ready",
+                "All required input files present -> ready",
+                "Every file-backed input the workflow references exists on the server, so the run is ready.",
+                options.requiredFilesReadyJson, true);
         }
         if (!options.requiredFilesMissingJson.empty())
         {
-            RunReadinessCase(recorder, http, "deployment-missing-file", options.requiredFilesMissingJson, false);
+            RunReadinessCase(recorder, http, "deployment-missing-file",
+                "A required input file is missing -> not ready (client would block)",
+                "The workflow references a file the server does not have; the readiness decision is not-ready and the client would block the run.",
+                options.requiredFilesMissingJson, false);
         }
     }
 
@@ -412,11 +496,17 @@ MatrixSummary RunMatrixV1(
         std::string wsError;
         if (!ws.Connect(options.wsTimeoutMs, wsError))
         {
-            recorder.Record(
-                "ws-handshake-smoke", "discovery", "fail",
-                "{\"connected\":true}",
-                "{\"connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}",
-                std::vector<std::string>{"websocket_timeout"});
+            CaseRecord rec;
+            rec.caseId = "ws-handshake-smoke";
+            rec.title = "WebSocket /ws handshake + catch-up frames";
+            rec.phase = "liveness";
+            rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames. Proves the WebSocket transport works end to end.";
+            rec.specRef = kSpecLiveness;
+            rec.expectedJson = "{\"connected\":true,\"sent\":true}";
+            rec.actualJson = "{\"connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
+            rec.result = "fail";
+            rec.errors.push_back("websocket_timeout");
+            recorder.Record(rec);
         }
         else
         {
@@ -427,18 +517,24 @@ MatrixSummary RunMatrixV1(
             std::ostringstream actual;
             actual << "{\"connected\":true,\"sent\":" << CaseLogger::Bool(sent)
                    << ",\"received_frames\":" << frames.size() << "}";
-            std::vector<std::string> errors;
+            CaseRecord rec;
+            rec.caseId = "ws-handshake-smoke";
+            rec.title = "WebSocket /ws handshake + catch-up frames";
+            rec.phase = "liveness";
+            rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames. Proves the WebSocket transport works end to end.";
+            rec.specRef = kSpecLiveness;
+            rec.expectedJson = "{\"connected\":true,\"sent\":true}";
+            rec.actualJson = actual.str();
+            rec.result = sent ? "pass" : "fail";
             if (!sent)
             {
-                errors.push_back("websocket_timeout");
+                rec.errors.push_back("websocket_timeout");
             }
-            recorder.Record(
-                "ws-handshake-smoke", "discovery",
-                sent ? "pass" : "fail",
-                "{\"connected\":true,\"sent\":true}", actual.str(), errors);
+            recorder.Record(rec);
         }
     }
 
+    logger.WriteIndex();
     WriteResultFile(options.outputRoot, summary);
     return summary;
 }

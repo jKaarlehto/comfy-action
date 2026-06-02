@@ -223,6 +223,25 @@ executable form of §4** — change the spec, change the asserted count. Today:
 stub matrix: pass=18 fail=0 skip=0 error=0   ← Layer 1 exact
 ```
 
+### Artifact shape
+
+Each case writes `contract-matrix/cases/NNN-<id>/case.json`, **prettified** and
+**self-describing**, so the evidence reads without the source:
+
+- `title` — plain one-line summary of what the case checks.
+- `phase` — `liveness` | `discovery` | `readiness` | `transport-selection`.
+- `description` — why the case exists, in prose.
+- `spec_ref` — pointer back into this document.
+- the request: `requested_transport` (a single required transport, never
+  downgraded) or `preferred_order` (first usable wins) for selection cases.
+- `expected` vs `actual`, `result`, `errors`.
+
+The run also writes `contract-matrix/INDEX.md` — every case grouped by phase
+with title + result — as the human entry point. The `.json` files are
+pretty-printed; the run-wide `.jsonl` streaming logs (`mock-client.jsonl`,
+`http.jsonl`, `websocket.jsonl`) stay one record per line (the JSON Lines
+contract — read line by line, not pretty-printed).
+
 ## 8. Status vs v2
 
 - **Layer 1 (18):** stub-verified as the contract matrix — all 18 cases run and

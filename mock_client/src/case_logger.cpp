@@ -63,32 +63,150 @@ void CaseLogger::Event(const std::string& jsonObject)
     stream << jsonObject << "\n";
 }
 
-void CaseLogger::WriteCase(
-    int index,
-    const std::string& caseId,
-    const std::string& phase,
-    const std::string& result,
-    const std::string& expectedJson,
-    const std::string& actualJson,
-    const std::vector<std::string>& errors)
+void CaseLogger::WriteCase(const CaseRecord& record)
 {
-    const std::string dir = MatrixDir() + "/cases/" + Pad3(index) + "-" + caseId;
+    const std::string dir = MatrixDir() + "/cases/" + Pad3(record.index) + "-" + record.caseId;
     EnsureDir(dir);
 
     std::ostringstream json;
     json << "{"
-         << "\"case_id\":" << Quote(caseId) << ","
-         << "\"phase\":" << Quote(phase) << ","
-         << "\"expected\":" << (expectedJson.empty() ? "null" : expectedJson) << ","
-         << "\"actual\":" << (actualJson.empty() ? "null" : actualJson) << ","
-         << "\"result\":" << Quote(result) << ","
-         << "\"errors\":" << Array(errors)
+         << "\"case_id\":" << Quote(record.caseId) << ","
+         << "\"title\":" << Quote(record.title) << ","
+         << "\"phase\":" << Quote(record.phase) << ","
+         << "\"description\":" << Quote(record.description) << ","
+         << "\"spec_ref\":" << Quote(record.specRef) << ",";
+    if (!record.requestedTransport.empty())
+    {
+        json << "\"requested_transport\":" << Quote(record.requestedTransport) << ",";
+    }
+    if (!record.preferredOrder.empty())
+    {
+        json << "\"preferred_order\":" << Array(record.preferredOrder) << ",";
+    }
+    json << "\"expected\":" << (record.expectedJson.empty() ? "null" : record.expectedJson) << ","
+         << "\"actual\":" << (record.actualJson.empty() ? "null" : record.actualJson) << ","
+         << "\"result\":" << Quote(record.result) << ","
+         << "\"errors\":" << Array(record.errors)
          << "}";
 
-    std::ofstream stream(dir + "/case.json");
-    stream << json.str() << "\n";
+    const std::string compact = json.str();
 
-    Event(json.str());
+    // case.json is prettified for human reading; the streaming log stays JSONL.
+    std::ofstream stream(dir + "/case.json");
+    stream << PrettyPrint(compact) << "\n";
+
+    Event(compact);
+    m_records.push_back(record);
+}
+
+void CaseLogger::WriteIndex()
+{
+    static const char* kPhases[] = {"liveness", "discovery", "readiness", "transport-selection"};
+
+    std::ostringstream md;
+    md << "# Contract matrix — case index\n\n"
+       << "Each `cases/NNN-<id>/case.json` is a self-describing result: `title` (what\n"
+       << "it checks), `description` (why), `spec_ref` (where it is derived), the\n"
+       << "request, and `expected` vs `actual`. The cases are the output of the axis\n"
+       << "analysis in `docs/notch_contract_matrix_spec.md` (§2 axes, §3 counting\n"
+       << "criterion, §4 exact counts) — not ad hoc. Grouped by phase:\n";
+
+    for (const char* phase : kPhases)
+    {
+        bool header = false;
+        for (const CaseRecord& r : m_records)
+        {
+            if (r.phase != phase)
+            {
+                continue;
+            }
+            if (!header)
+            {
+                md << "\n## " << phase << "\n\n";
+                header = true;
+            }
+            md << "- `" << Pad3(r.index) << "-" << r.caseId << "` — " << r.title
+               << "  _(" << r.result << ")_\n";
+        }
+    }
+
+    std::ofstream stream(MatrixDir() + "/INDEX.md");
+    stream << md.str();
+}
+
+std::string CaseLogger::PrettyPrint(const std::string& compactJson)
+{
+    std::string out;
+    int indent = 0;
+    bool inString = false;
+    bool escape = false;
+    for (size_t i = 0; i < compactJson.size(); ++i)
+    {
+        char c = compactJson[i];
+        if (inString)
+        {
+            out += c;
+            if (escape)
+            {
+                escape = false;
+            }
+            else if (c == '\\')
+            {
+                escape = true;
+            }
+            else if (c == '"')
+            {
+                inString = false;
+            }
+            continue;
+        }
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r')
+        {
+            continue; // drop insignificant whitespace; indentation is re-added below
+        }
+        switch (c)
+        {
+        case '"':
+            inString = true;
+            out += c;
+            break;
+        case '{':
+        case '[':
+            if (i + 1 < compactJson.size() && (compactJson[i + 1] == '}' || compactJson[i + 1] == ']'))
+            {
+                out += c;
+                out += compactJson[i + 1];
+                ++i;
+            }
+            else
+            {
+                ++indent;
+                out += c;
+                out += '\n';
+                out.append(static_cast<size_t>(indent) * 2, ' ');
+            }
+            break;
+        case '}':
+        case ']':
+            --indent;
+            out += '\n';
+            out.append(static_cast<size_t>(indent) * 2, ' ');
+            out += c;
+            break;
+        case ',':
+            out += c;
+            out += '\n';
+            out.append(static_cast<size_t>(indent) * 2, ' ');
+            break;
+        case ':':
+            out += ": ";
+            break;
+        default:
+            out += c;
+            break;
+        }
+    }
+    return out;
 }
 
 std::string CaseLogger::Quote(const std::string& value)
