@@ -1,10 +1,12 @@
 {
   "latent": {
     "class_type": "EmptyLatentImage",
-    "inputs": { "width": 64, "height": 64, "batch_size": 1 }
+    "inputs": { "width": 64, "height": 64, "batch_size": 1 },
+    "_meta": { "title": "latent" }
   },
   "out_image": {
     "class_type": "NotchOutputNode",
-    "inputs": { "image": ["latent", 0] }
+    "inputs": { "image": ["latent", 0] },
+    "_meta": { "title": "image output" }
   }
 }

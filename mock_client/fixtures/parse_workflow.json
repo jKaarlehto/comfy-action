@@ -1,18 +1,22 @@
 {
   "img_src": {
     "class_type": "EmptyLatentImage",
-    "inputs": { "width": 64, "height": 64, "batch_size": 1 }
+    "inputs": { "width": 64, "height": 64, "batch_size": 1 },
+    "_meta": { "title": "image source" }
   },
   "mesh_src": {
     "class_type": "EmptyLatentImage",
-    "inputs": { "width": 64, "height": 64, "batch_size": 1 }
+    "inputs": { "width": 64, "height": 64, "batch_size": 1 },
+    "_meta": { "title": "mesh source" }
   },
   "out_image": {
     "class_type": "NotchOutputNode",
-    "inputs": { "image": ["img_src", 0] }
+    "inputs": { "image": ["img_src", 0] },
+    "_meta": { "title": "image output" }
   },
   "out_mesh": {
     "class_type": "NotchOutputNode",
-    "inputs": { "mesh": ["mesh_src", 0] }
+    "inputs": { "mesh": ["mesh_src", 0] },
+    "_meta": { "title": "mesh output" }
   }
 }
