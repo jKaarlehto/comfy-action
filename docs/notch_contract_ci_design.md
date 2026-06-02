@@ -276,6 +276,140 @@ phase can emulate remote topology by starting a second container or machine.
 That should be a separate remote-topology mode because Docker networking
 and filesystem mounts add their own failure modes.
 
+### Contract Matrix Execution Model
+
+The matrix runner must be diagnostic first: it should complete the full case
+list and report every failure in one run. A single broken case must not abort the
+remaining cases unless the shared setup itself failed (server cannot start,
+client cannot compile, `/features` is unreachable, or `/object_info` is missing
+required node classes).
+
+Use two implementation phases:
+
+1. **Matrix v1: discovery and selection.** Use live `/features` and
+   `/notch/parse` responses plus the C++ client's transport-selection helper.
+   Do not queue workflow execution yet. This verifies that the extension's
+   advertised workflow/type axis, server deployment facts, and client
+   reachability negotiation agree.
+2. **Matrix v2: execution and delivery.** Add `/notch/inject`, WebSocket
+   lifecycle capture, disk output validation, HTTP artifact fetch validation,
+   CUDA share-status validation, and optional CUDA IPC import when the runner
+   environment supports it.
+
+For both phases, each case should produce a structured result object:
+
+```json
+{
+  "case_id": "image-cuda-local",
+  "phase": "selection",
+  "expected": {"ok": true, "transport": "cuda"},
+  "actual": {"ok": true, "transport": "cuda"},
+  "result": "pass",
+  "errors": []
+}
+```
+
+Allowed case results:
+
+- `pass`: expected and actual behavior match.
+- `fail`: expected and actual behavior differ.
+- `skip`: the case is not applicable to this runner, with an explicit reason
+  such as `cuda_unavailable`.
+- `error`: the case could not complete because the harness, server, or client
+  encountered an unexpected failure.
+
+The final `contract-matrix-result.json` should fail the job when any case is
+`fail` or `error`, but only after all runnable cases have completed. It should
+include totals by phase and result, plus a compact list of failed case ids and
+error codes.
+
+### Matrix Evidence And Hashes
+
+Every case must write enough evidence to debug failures without replaying the
+run. Use one directory per case:
+
+```text
+contract-matrix/
+  cases/
+    001-image-cuda-local/
+      case.json
+      mock-client.jsonl
+      http.jsonl
+      websocket.jsonl
+      server.log
+      hashes.json
+      request-parse.json
+      response-parse.json
+      request-inject.json
+      response-inject.json
+```
+
+All transcripts should be JSONL with timestamped records. Plain text may be
+included for readability, but JSONL is the source of truth for automated
+inspection.
+
+- `mock-client.jsonl`: client decisions, selected transport, expected outcome,
+  and validation steps.
+- `http.jsonl`: sanitized HTTP request/response metadata and bodies for Notch
+  API calls. Large binary bodies should be represented by size, content type,
+  and hash rather than embedded bytes.
+- `websocket.jsonl`: sent and received WebSocket messages, including timestamps,
+  prompt ids, output-ready events, CUDA share-status messages, and terminal
+  execution events.
+- `server.log`: the ComfyUI log slice for the case. Keep full `comfyui.log` for
+  the run, but also record per-case slices by timestamp or byte offset.
+- `hashes.json`: all input and output integrity checks for the case.
+
+Hash all deterministic test inputs before sending them and all observed outputs
+after receiving them. Prefer SHA-256 over ad hoc checksums. `hashes.json` should
+record at least:
+
+```json
+{
+  "inputs": [
+    {"name": "image", "type": "IMAGE", "bytes": 1048576, "sha256": "<hex>"}
+  ],
+  "requests": [
+    {"name": "parse_request", "sha256": "<canonical-json-sha256>"}
+  ],
+  "outputs": [
+    {"name": "notch-output-ready", "transport": "http", "bytes": 1048576, "sha256": "<hex>"}
+  ],
+  "expected_outputs": [
+    {"name": "image", "sha256": "<hex>", "comparison": "exact"}
+  ]
+}
+```
+
+Use exact hashes for byte-stable artifacts such as generated fixture files,
+HTTP artifact bytes, copied file outputs, and replay metadata. For image tensor
+outputs that may pass through codec conversion, use a two-part check: hash the
+raw delivered artifact bytes and also validate decoded dimensions, channel
+count, dtype/range, and a small deterministic pixel/sample hash when the format
+is expected to preserve values. Do not mark a delivery case as pass merely
+because an output file exists.
+
+The mock client should generate deterministic payloads with embedded case ids
+where practical. This makes corruption obvious in both hashes and manual
+inspection. Example: small PNG/checker image, short WAV tone, tiny JSON camera
+payload, tiny GLB/mesh fixture, and a plain file payload whose content includes
+the case id and expected transport.
+
+Failure categories should be stable strings so reports can be grouped:
+
+- `parse_contract_mismatch`
+- `server_feature_mismatch`
+- `transport_selection_mismatch`
+- `unexpected_accept`
+- `unexpected_reject`
+- `websocket_timeout`
+- `output_event_missing`
+- `output_artifact_missing`
+- `output_hash_mismatch`
+- `cuda_status_missing`
+- `cuda_import_failed`
+- `harness_error`
+
 ## Artifacts
 
 Every run uploads an artifact directory. Prefer plain files:
