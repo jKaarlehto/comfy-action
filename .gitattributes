@@ -1,0 +1,17 @@
+# Normalize all text files to LF in the repo and on checkout, so Windows tools
+# stop reintroducing CRLF and the working tree stays clean across Windows + WSL.
+* text=auto eol=lf
+
+# Keep binaries byte-for-byte (text=auto detects most; explicit is safer).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.safetensors binary
+*.ckpt binary
+*.pt binary
+*.bin binary
+*.zip binary
+*.gz binary
