@@ -17,7 +17,7 @@ classes.
 - create an isolated Python virtual environment inside the container;
 - install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies;
 - build and run `cpp/notch_comfy_client`'s compile-check target;
-- start ComfyUI on `127.0.0.1:<port>`;
+- start ComfyUI on `<listen_address>:<port>` and poll the same address;
 - assert `/object_info` contains `NotchSingleInput`, `NotchOutputNode`, and `SpoutReceiver`;
 - write environment, compatibility, log, and result artifacts.
 
@@ -82,6 +82,7 @@ checks on a floating branch.
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
 | `extension_ref` | empty | Optional extension tag, branch, or commit when `extension_repository` is set. |
+| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The smoke client polls this same address. |
 | `port` | `8188` | ComfyUI port inside the container. |
 | `timeout` | `180` | Seconds to wait for server startup. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `python main.py`. |
@@ -137,6 +138,8 @@ docker run --rm \
   --mode smoke \
   --comfyui-repository https://github.com/comfyanonymous/ComfyUI.git \
   --comfyui-ref v0.23.0 \
+  --host 127.0.0.1 \
+  --port 8188 \
   --workspace /workspace \
   --artifacts /artifacts
 ```

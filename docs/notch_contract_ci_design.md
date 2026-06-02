@@ -43,9 +43,9 @@ image. It is not declared as `runs: using: docker`, because the wrapper needs to
 decide at runtime whether to pass `--gpus all`, mount the caller checkout, and
 upload artifacts with `actions/upload-artifact`.
 
-The host runner can be Windows or Linux as long as it has Docker and Bash. During
-development the expected host is a self-hosted Windows runner using Docker
-Desktop or a comparable Docker engine. The actual ComfyUI server, Python
+The host runner can be Windows or Linux as long as it has Docker and PowerShell.
+During development the expected host is a self-hosted Windows runner using
+Docker Desktop or a comparable Docker engine. The actual ComfyUI server, Python
 environment, and C++ compile check run inside the Linux CUDA image, so the smoke
 contract is portable across Docker hosts.
 
@@ -110,6 +110,7 @@ Keep configuration small:
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
 | `extension_ref` | empty | Tag, branch, or commit to checkout when `extension_repository` is set. |
+| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The smoke client polls this same address. |
 | `port` | `8188` | Local ComfyUI HTTP port inside the container. |
 | `timeout` | `180` | Seconds to wait for ComfyUI to become reachable. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `main.py`. |
@@ -149,7 +150,8 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
    cpp/notch_comfy_client -> notch_comfy_client_compile_check
    ```
 
-9. Start ComfyUI on `127.0.0.1:<port>`.
+9. Start ComfyUI on `<listen_address>:<port>` using
+   `python main.py --listen=<listen_address> --port=<port>`.
 10. Poll `GET /queue` until the server is reachable.
 11. Best-effort collect Comfy feature flags from `GET /features`.
 12. Request `GET /object_info`.

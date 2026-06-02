@@ -22,6 +22,10 @@ inputs:
     description: "Optional ComfyUI-Notch tag, branch, or commit when extension_repository is set."
     required: false
     default: ""
+  listen_address:
+    description: "ComfyUI listen address inside the container. The smoke client polls this same address."
+    required: false
+    default: "127.0.0.1"
   port:
     description: "ComfyUI HTTP port inside the container."
     required: false
@@ -148,7 +152,7 @@ runs:
           "--extension-ref", "${{ inputs.extension_ref }}",
           "--workspace", "/workspace",
           "--artifacts", "/artifacts",
-          "--host", "127.0.0.1",
+          "--host", "${{ inputs.listen_address }}",
           "--port", "${{ inputs.port }}",
           "--timeout", "${{ inputs.timeout }}",
           "--comfyui-flags=${{ inputs.comfyui_flags }}",

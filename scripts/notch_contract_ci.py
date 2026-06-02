@@ -21,6 +21,9 @@ from typing import Any
 
 
 NOTCH_NODE_CLASSES = ["NotchSingleInput", "NotchOutputNode", "SpoutReceiver"]
+DEFAULT_COMFY_LISTEN_ADDRESS = "127.0.0.1"
+DEFAULT_COMFY_PORT = 8188
+DEFAULT_COMFY_SCHEME = "http"
 
 
 class RunnerError(RuntimeError):
@@ -262,10 +265,8 @@ def start_comfy_server(
     command = [
         str(python),
         "main.py",
-        "--listen",
-        host,
-        "--port",
-        str(port),
+        f"--listen={host}",
+        f"--port={port}",
         *shlex.split(flags or ""),
     ]
     print(f"+ {' '.join(shlex.quote(part) for part in command)}")
@@ -312,8 +313,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace", default="/workspace")
     parser.add_argument("--workdir", default="/work/notch-contract-ci")
     parser.add_argument("--artifacts", default="/artifacts")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8188)
+    parser.add_argument("--host", default=DEFAULT_COMFY_LISTEN_ADDRESS)
+    parser.add_argument("--port", type=int, default=DEFAULT_COMFY_PORT)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--comfyui-flags", default="--disable-auto-launch")
     parser.add_argument("--torch-index-url", default="https://download.pytorch.org/whl/cu121")
@@ -372,7 +373,7 @@ def main() -> int:
         compile_cpp_client(runner, extension_dir, workdir)
         result["checks"]["cpp_client_compiles"] = True
 
-        base_url = f"http://{args.host}:{args.port}"
+        base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
         server = start_comfy_server(
             python,
             comfy_dir,
