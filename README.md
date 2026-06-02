@@ -54,7 +54,7 @@ on:
       comfyui_ref:
         description: "ComfyUI tag or commit"
         required: true
-        default: "2d7e16ce803d63359ec67fef7184fbc9b24c1883"
+        default: "v0.23.0"
 
 jobs:
   smoke:
@@ -79,7 +79,7 @@ checks on a floating branch.
 |---|---|---|
 | `mode` | `smoke` | `smoke` runs the implemented check. `integration` is reserved for the future mock-client suite and currently fails after smoke. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
-| `comfyui_ref` | `2d7e16ce803d63359ec67fef7184fbc9b24c1883` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
+| `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
 | `extension_ref` | empty | Optional extension tag, branch, or commit when `extension_repository` is set. |
 | `port` | `8188` | ComfyUI port inside the container. |
@@ -136,7 +136,7 @@ docker run --rm \
   notch-contract-ci:local \
   --mode smoke \
   --comfyui-repository https://github.com/comfyanonymous/ComfyUI.git \
-  --comfyui-ref 2d7e16ce803d63359ec67fef7184fbc9b24c1883 \
+  --comfyui-ref v0.23.0 \
   --workspace /workspace \
   --artifacts /artifacts
 ```

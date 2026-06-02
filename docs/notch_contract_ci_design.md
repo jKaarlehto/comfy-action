@@ -107,7 +107,7 @@ Keep configuration small:
 |---|---|---|
 | `mode` | `smoke` | `smoke` runs the implemented check. `integration` is reserved for the future mock-client permutation suite and currently fails after smoke. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository to clone inside the container. |
-| `comfyui_ref` | `2d7e16ce803d63359ec67fef7184fbc9b24c1883` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
+| `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
 | `extension_ref` | empty | Tag, branch, or commit to checkout when `extension_repository` is set. |
 | `port` | `8188` | Local ComfyUI HTTP port inside the container. |

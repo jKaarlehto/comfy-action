@@ -13,7 +13,7 @@ inputs:
   comfyui_ref:
     description: "ComfyUI tag, branch, or commit. Pin this to a release tag or commit for reproducible runs."
     required: false
-    default: "2d7e16ce803d63359ec67fef7184fbc9b24c1883"
+    default: "v0.23.0"
   extension_repository:
     description: "Optional ComfyUI-Notch git repository URL. Empty means use the caller workspace checkout."
     required: false
