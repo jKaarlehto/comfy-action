@@ -1,11 +1,11 @@
-name: "ComfyUI-Notch contract CI"
-description: "Run ComfyUI-Notch smoke and contract checks in a Docker container"
+name: "ComfyUI-Notch compatibility checks"
+description: "Run ComfyUI-Notch extension initialization and contract matrix checks in a Docker container"
 
 inputs:
   mode:
-    description: "Check mode. smoke starts ComfyUI, verifies /object_info, and compiles the C++ client interface. integration is reserved for the future mock-client permutation suite."
+    description: "Check mode. extension_initialization starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. contract_matrix is reserved for the future mock-client permutation suite."
     required: false
-    default: "smoke"
+    default: "extension_initialization"
   comfyui_repository:
     description: "ComfyUI git repository URL."
     required: false
@@ -23,7 +23,7 @@ inputs:
     required: false
     default: ""
   listen_address:
-    description: "ComfyUI listen address inside the container. The smoke client polls this same address."
+    description: "ComfyUI listen address inside the container. The check client polls this same address."
     required: false
     default: "127.0.0.1"
   port:
@@ -69,7 +69,7 @@ inputs:
   expected_node_classes:
     description: "Comma-separated Notch node classes expected in /object_info."
     required: false
-    # SpoutReceiver is Windows-only; Docker smoke runs on Linux and checks the cross-platform nodes.
+    # SpoutReceiver is Windows-only; Docker extension initialization runs on Linux and checks the cross-platform nodes.
     default: "NotchSingleInput,NotchOutputNode"
 
 runs:

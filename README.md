@@ -1,16 +1,16 @@
 # comfy-action
 
-Docker-based contract checks for `ComfyUI-Notch`.
+Docker-based compatibility checks for `ComfyUI-Notch`.
 
 This action is meant to be used from the `ComfyUI-Notch` repository. It builds a
 local Docker image, starts a pinned ComfyUI checkout inside the container,
 installs the caller's `ComfyUI-Notch` checkout into `custom_nodes`, compiles the
 C++ client interface, and verifies that `/object_info` exposes the cross-platform
-Notch node classes.
+Notch node classes and server feature facts.
 
 ## What It Checks
 
-`mode: smoke`:
+`mode: extension_initialization`:
 
 - clone ComfyUI at `comfyui_ref`;
 - copy or clone `ComfyUI-Notch` into `ComfyUI/custom_nodes/ComfyUI-Notch`;
@@ -18,11 +18,12 @@ Notch node classes.
 - install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies;
 - build and run `cpp/notch_comfy_client`'s compile-check target;
 - start ComfyUI on `<listen_address>:<port>` and poll the same address;
+- assert `/features` includes Notch compatibility facts;
 - assert `/object_info` contains `NotchSingleInput` and `NotchOutputNode`;
 - write environment, compatibility, log, and result artifacts.
 
-`mode: integration` is reserved for the next phase. It currently runs the smoke
-path and then fails with a clear message instead of claiming the live
+`mode: contract_matrix` is reserved for the next phase. It currently runs the
+extension-initialization path and then fails with a clear message instead of claiming the live
 HTTP/WS/CUDA permutation suite exists.
 
 ## Runner Model
@@ -43,10 +44,10 @@ wrapper can probe and pass it.
 ## Example Workflow
 
 Create this in `ComfyUI-Notch` as
-`.github/workflows/notch-contract-smoke.yml`:
+`.github/workflows/notch-compatibility.yml`:
 
 ```yaml
-name: notch contract smoke
+name: Notch Comfy compatibility checks
 
 on:
   workflow_dispatch:
@@ -57,15 +58,15 @@ on:
         default: "v0.23.0"
 
 jobs:
-  smoke:
+  extension_initialization:
     runs-on: [self-hosted, comfy-contract]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run contract smoke
+      - name: Run extension initialization check
         uses: jKaarlehto/comfy-action@<pin-this-action-commit>
         with:
-          mode: smoke
+          mode: extension_initialization
           comfyui_ref: ${{ inputs.comfyui_ref }}
           use_gpu: auto
 ```
@@ -77,12 +78,12 @@ checks on a floating branch.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `smoke` | `smoke` runs the implemented check. `integration` is reserved for the future mock-client suite and currently fails after smoke. |
+| `mode` | `extension_initialization` | `extension_initialization` runs the implemented boot/node/feature/client compile check. `contract_matrix` is reserved for the future mock-client suite and currently fails after initialization. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
 | `extension_ref` | empty | Optional extension tag, branch, or commit when `extension_repository` is set. |
-| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The smoke client polls this same address. |
+| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The check client polls this same address. |
 | `port` | `8188` | ComfyUI port inside the container. |
 | `timeout` | `180` | Seconds to wait for server startup. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `python main.py`. |
@@ -93,7 +94,7 @@ checks on a floating branch.
 | `docker_no_cache` | `false` | Build with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
 | `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker smoke expectation. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-initialization expectation. |
 
 ## Artifacts
 
@@ -109,8 +110,8 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `server-feature-flags.json`
 - `object-info-summary.json`
 - `object-info-debug.json` when node discovery fails
-- `smoke-result.json`
-- `integration-result.json` when `mode: integration`
+- `extension-initialization-result.json`
+- `contract-matrix-result.json` when `mode: contract_matrix`
 - `compatibility-result.json`
 
 `compatibility-result.json` is the file to use when promoting a
@@ -135,7 +136,7 @@ docker run --rm \
   -v /path/to/ComfyUI-Notch:/workspace \
   -v /tmp/notch-contract-artifacts:/artifacts \
   notch-contract-ci:local \
-  --mode smoke \
+  --mode extension_initialization \
   --comfyui-repository https://github.com/comfyanonymous/ComfyUI.git \
   --comfyui-ref v0.23.0 \
   --host 127.0.0.1 \

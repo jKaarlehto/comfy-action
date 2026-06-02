@@ -46,8 +46,8 @@ upload artifacts with `actions/upload-artifact`.
 The host runner can be Windows or Linux as long as it has Docker and PowerShell.
 During development the expected host is a self-hosted Windows runner using
 Docker Desktop or a comparable Docker engine. The actual ComfyUI server, Python
-environment, and C++ compile check run inside the Linux CUDA image, so the smoke
-contract is portable across Docker hosts.
+environment, and C++ compile check run inside the Linux CUDA image, so the
+extension-initialization contract is portable across Docker hosts.
 
 The container mounts:
 
@@ -72,8 +72,8 @@ CI product:
 - The self-hosted runner is trusted infrastructure. Docker gives environment
   repeatability and cleanup, but it is not a security boundary for untrusted
   workflows.
-- `integration` intentionally fails until the C++ mock client exists. The action
-  must not report a green integration contract before that suite is real.
+- `contract_matrix` intentionally fails until the C++ mock client exists. The
+  action must not report a green matrix contract before that suite is real.
 
 ## Goals
 
@@ -83,7 +83,7 @@ CI product:
 - Verify that `cpp/notch_comfy_client` compiles.
 - Record the Python, CUDA, Docker-host, ComfyUI, and extension facts needed to
   reproduce a successful or failed run.
-- In future integration mode, verify negotiation-axis positives and negatives.
+- In future `contract_matrix` mode, verify negotiation-axis positives and negatives.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
 ## Non-Goals
@@ -93,9 +93,9 @@ CI product:
 - Do not test Notch output targets. Connected, Project Resource, New Output
   Node, Save to Disk, and other target choices are Notch-side output handling
   policy, not part of transport negotiation.
-- Do not emulate a remote Comfy server in the first integration mode. Remote
+- Do not emulate a remote Comfy server in the first `contract_matrix` mode. Remote
   behavior can be added later with a second container or machine.
-- Do not download large model sets for the smoke check.
+- Do not download large model sets for the extension-initialization check.
 - Do not archive an entire Python environment unless a repro needs it. Prefer
   manifest artifacts.
 
@@ -105,12 +105,12 @@ Keep configuration small:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `smoke` | `smoke` runs the implemented check. `integration` is reserved for the future mock-client permutation suite and currently fails after smoke. |
+| `mode` | `extension_initialization` | `extension_initialization` runs the implemented boot/node/feature/client compile check. `contract_matrix` is reserved for the future mock-client permutation suite and currently fails after initialization. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository to clone inside the container. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
 | `extension_ref` | empty | Tag, branch, or commit to checkout when `extension_repository` is set. |
-| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The smoke client polls this same address. |
+| `listen_address` | `127.0.0.1` | ComfyUI listen address inside the container. The check client polls this same address. |
 | `port` | `8188` | Local ComfyUI HTTP port inside the container. |
 | `timeout` | `180` | Seconds to wait for ComfyUI to become reachable. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `main.py`. |
@@ -121,13 +121,13 @@ Keep configuration small:
 | `docker_no_cache` | `false` | Build the image with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Simple path under the caller workspace. Cleared at the start of each run. |
 | `upload_artifacts` | `true` | Upload `artifact_dir` with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker smoke expectation. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-initialization expectation. |
 
 Do not add arbitrary per-test selectors until the two modes prove too coarse.
-The integration suite should own its case table in source control so a run is
+The contract matrix suite should own its case table in source control so a run is
 reproducible from `mode + comfyui_ref + extension_ref + action commit`.
 
-## Smoke Flow
+## Extension Initialization Flow
 
 1. Build the local Docker runner image from this action repo.
 2. Start the runner container with the caller workspace and artifact directory
@@ -162,20 +162,21 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
    NotchOutputNode
    ```
 
-14. Write the smoke result and compatibility artifacts.
+14. Write the extension-initialization result and compatibility artifacts.
 15. Stop ComfyUI; Docker removes the container.
 
 This proves that the pinned ComfyUI version can import the extension, expose the
 Comfy node classes, and compile the C++ client interface. It does not prove
 workflow execution correctness.
 
-## Integration Mode
+## Contract Matrix Mode
 
-Integration mode is planned, not implemented in the first Docker action. The
-current `integration` mode runs smoke setup, writes an `integration-result.json`
-with `result: "not_implemented"`, and fails instead of claiming a pass.
+Contract matrix mode is planned, not implemented in the first Docker action. The
+current `contract_matrix` mode runs extension-initialization setup, writes a
+`contract-matrix-result.json` with `result: "not_implemented"`, and fails instead
+of claiming a pass.
 
-The future integration client should be a lightweight C++ executable built
+The future matrix client should be a lightweight C++ executable built
 during the run. It links the vendored
 `ComfyUI-Notch/cpp/notch_comfy_client` source and provides only test transports:
 
@@ -265,14 +266,14 @@ Pure selection matrix, using a soft preference order:
 | prefer cuda then disk | `cuda,disk,http` | `disk,http` | `disk,http` | `cuda,disk,http` | `disk,http` | choose `disk` |
 | no order match but usable remains | `disk,http` | `disk,http` | `http` | `cuda,disk` | `http` | choose first usable `http` |
 
-The hard-request rows are the integration contract for user- or target-driven
+The hard-request rows are the contract for user- or target-driven
 transport choices. The soft-order rows are helper behavior only; they must not
 be read as permission for the server to downgrade a submitted
 `config.output.transport`.
 
-Remote server cases are out of scope for the first integration mode. A future
+Remote server cases are out of scope for the first `contract_matrix` mode. A future
 phase can emulate remote topology by starting a second container or machine.
-That should be a separate `remote-integration` mode because Docker networking
+That should be a separate remote-topology mode because Docker networking
 and filesystem mounts add their own failure modes.
 
 ## Artifacts
@@ -291,8 +292,8 @@ git.log
 python-install.log
 environment.log
 cpp-compile.log
-smoke-result.json
-integration-result.json
+extension-initialization-result.json
+contract-matrix-result.json
 compatibility-result.json
 ```
 
@@ -312,15 +313,15 @@ compatibility-result.json
 - CMake and Git versions.
 - Server URL and port.
 - Selected mode.
-- Smoke assertions and result.
-- Integration case summary when `mode=integration`.
+- Extension-initialization assertions and result.
+- Contract matrix case summary when `mode=contract_matrix`.
 
 Every run should also write `compatibility-result.json`:
 
 ```json
 {
   "schema_version": 1,
-  "profile": "smoke",
+  "profile": "extension_initialization",
   "result": "pass",
   "comfyui_ref": "v0.x.y",
   "comfyui_commit": "<resolved commit>",
@@ -339,7 +340,7 @@ Every run should also write `compatibility-result.json`:
 }
 ```
 
-For integration mode, use `profile: "integration"` and include case totals.
+For contract matrix mode, use `profile: "contract_matrix"` and include case totals.
 
 ## Cleanup And Caching
 
@@ -362,7 +363,8 @@ Safe to cache or reuse:
 - Docker image layers.
 - Pip wheel/download cache in a later phase, if the workflow records exact
   package manifests and the cache key includes the relevant lock inputs.
-- Optional model cache for future non-smoke tests, but not phase-1 smoke.
+- Optional model cache for future non-initialization tests, but not the phase-1
+  extension-initialization check.
 
 Do not cache:
 
@@ -393,7 +395,7 @@ Suggested content:
 ```json
 {
   "schema_version": 1,
-  "profile": "smoke",
+  "profile": "extension_initialization",
   "comfyui_ref": "v0.x.y",
   "comfyui_commit": "<resolved commit>",
   "comfyui_notch_commit": "<commit>",
@@ -415,8 +417,8 @@ Promotion rules:
 - Manual trusted runs may promote when a consuming workflow explicitly performs
   that write.
 - Promotion should require a passing result for the selected mode.
-- Future full-matrix results should have their own profile value rather than
-  overwriting a smoke-only record with stronger claims.
+- Future contract-matrix results should have their own profile value rather than
+  overwriting an extension-initialization record with stronger claims.
 
 ## Future Phases
 

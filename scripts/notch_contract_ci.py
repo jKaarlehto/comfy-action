@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-# SpoutReceiver is intentionally omitted from the Docker smoke expectation.
+# SpoutReceiver is intentionally omitted from the Docker extension initialization check.
 # SpoutGL is Windows-only; Linux CI validates the cross-platform node surface.
 NOTCH_NODE_CLASSES = ["NotchSingleInput", "NotchOutputNode"]
 DEFAULT_COMFY_LISTEN_ADDRESS = "127.0.0.1"
@@ -312,8 +312,12 @@ def file_sha256(path: Path) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run ComfyUI-Notch contract checks")
-    parser.add_argument("--mode", choices=["smoke", "integration"], default="smoke")
+    parser = argparse.ArgumentParser(description="Run ComfyUI-Notch compatibility checks")
+    parser.add_argument(
+        "--mode",
+        choices=["extension_initialization", "contract_matrix"],
+        default="extension_initialization",
+    )
     parser.add_argument("--comfyui-repository", required=True)
     parser.add_argument("--comfyui-ref", default="")
     parser.add_argument("--extension-repository", default="")
@@ -333,6 +337,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    mode = args.mode
+    result_filename = (
+        "extension-initialization-result.json"
+        if mode == "extension_initialization"
+        else "contract-matrix-result.json"
+    )
     artifacts = Path(args.artifacts).resolve()
     workdir = Path(args.workdir).resolve()
     workspace = Path(args.workspace).resolve()
@@ -348,7 +358,7 @@ def main() -> int:
     server: subprocess.Popen[Any] | None = None
     result: dict[str, Any] = {
         "schema_version": 1,
-        "profile": args.mode,
+        "profile": mode,
         "result": "fail",
         "checks": {
             "server_started": False,
@@ -399,7 +409,7 @@ def main() -> int:
 
         environment = {
             "schema_version": 1,
-            "mode": args.mode,
+            "mode": mode,
             "platform": platform.platform(),
             "machine": platform.machine(),
             "python_env": env_snapshot,
@@ -429,20 +439,20 @@ def main() -> int:
             }
         )
 
-        if args.mode == "integration":
+        if mode == "contract_matrix":
             write_json(
-                artifacts / "integration-result.json",
+                artifacts / result_filename,
                 {
                     "schema_version": 1,
                     "result": "not_implemented",
-                    "implemented_checks": ["smoke", "cpp_client_compile_check"],
+                    "implemented_checks": ["extension_initialization", "cpp_client_compile_check"],
                     "missing_checks": ["live_http_ws_cuda_mock_client_permutation_suite"],
                 },
             )
-            raise RunnerError("integration mode needs the CI mock client executable before it can claim a pass")
+            raise RunnerError("contract_matrix mode needs the CI mock client executable before it can claim a pass")
 
         result["result"] = "pass"
-        write_json(artifacts / "smoke-result.json", result)
+        write_json(artifacts / result_filename, result)
 
         compatibility = {
             **result,
@@ -454,7 +464,7 @@ def main() -> int:
         return 0
     except Exception as exc:
         result["error"] = str(exc)
-        write_json(artifacts / "smoke-result.json", result)
+        write_json(artifacts / result_filename, result)
         environment_path = artifacts / "environment.json"
         if environment_path.exists():
             try:
@@ -468,7 +478,7 @@ def main() -> int:
                 environment_path,
                 {
                     "schema_version": 1,
-                    "mode": args.mode,
+                    "mode": mode,
                     "platform": platform.platform(),
                     "machine": platform.machine(),
                     "error": str(exc),
