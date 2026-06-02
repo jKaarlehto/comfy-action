@@ -1,499 +1,169 @@
-name: "Run ComfyUI on Various OSs"
-description: "Run a comfyui workflow on various OSs"
+name: "ComfyUI-Notch contract CI"
+description: "Run ComfyUI-Notch smoke and contract checks in a Docker container"
+
 inputs:
-  os:
-    description: "Operating System. macos, linux, windows."
-    required: true
+  mode:
+    description: "Check mode. smoke starts ComfyUI, verifies /object_info, and compiles the C++ client interface. integration is reserved for the future mock-client permutation suite."
+    required: false
+    default: "smoke"
+  comfyui_repository:
+    description: "ComfyUI git repository URL."
+    required: false
+    default: "https://github.com/comfyanonymous/ComfyUI.git"
+  comfyui_ref:
+    description: "ComfyUI tag, branch, or commit. Pin this to a release tag or commit for reproducible runs."
+    required: false
+    default: "2d7e16ce803d63359ec67fef7184fbc9b24c1883"
+  extension_repository:
+    description: "Optional ComfyUI-Notch git repository URL. Empty means use the caller workspace checkout."
+    required: false
     default: ""
-  python_version:
-    description: "Python Version. Will be used in the conda install command for pytorch. 3.9 or 3.10. Only valid when os is linux or windows."
+  extension_ref:
+    description: "Optional ComfyUI-Notch tag, branch, or commit when extension_repository is set."
     required: false
-    default: "3.9"
-  cuda_version:
-    description: "CUDA Version. Will be used in the conda install command for pytorch."
+    default: ""
+  port:
+    description: "ComfyUI HTTP port inside the container."
     required: false
-    default: "12.1"
-  torch_version:
-    description: "Pytorch Version type, 'stable', 'nightly', 'specific'"
-    required: false
-    default: 'stable'
-  specific_torch_install:
-    description: "Command for installing specific torch version. E.g. `conda install bla bla`"
-    required: false
-    default: ''
-  models-json:
-    description: 'JSON string containing models and their download URLs. The models will be downloaded into the exact directory relative to /ComfyUI/models/. eg { "model_name": { url: "https://example.com/model.pth", "directory": "checkpoints" } }'
-    required: false
-  workflow_filenames:
-    description: "The list of workflow filenames is listed in the workflows/ directory. Separate by comma, e.g., 'workflow1.json,workflow2.json'."
-    required: false
-    default: 'auto'
-  comfyui_flags:
-    description: "Flags to pass to the comfyui application. eg. --force-fp16"
-    required: false
-    default: ''
-  use_prior_commit:
-    description: "Specify 'true' to use the prior commit, or 'false' to use the current commit."
-    required: false
-    default: 'false'
-  # Not yet supported
-  workflow_raw_json:
-    description: "Workflow's raw json file"
-    required: false
-    default: ''
+    default: "8188"
   timeout:
-    description: "Timeout for the workflow (in seconds)"
+    description: "Seconds to wait for the ComfyUI server to become reachable."
     required: false
-    default: "600"
-  google_credentials:
-    description: "Service Account JSON for uploading to GCS. Required if you want results uploaded to CI dashboard. https://ci.comfy.org"
+    default: "180"
+  comfyui_flags:
+    description: "Flags passed to ComfyUI main.py."
     required: false
-  gcs_bucket_name:
-    description: "Name of the GCS bucket to upload the output files to. Required if you want results uploaded to CI dashboard. https://ci.comfy.org"
+    default: "--disable-auto-launch"
+  torch_index_url:
+    description: "PyTorch pip index URL used inside the container."
     required: false
-    default: "comfy-ci-results"
-  output_prefix:
-    description: "Prefix for the output files. Required if you want results uploaded to CI dashboard. https://ci.comfy.org"
-    required: false
-    default: "ComfyUI"
-  api_endpoint:
-    description: "Comfy Org API endpoint"
-    required: false
-    default: "https://api.comfy.org/upload-artifact"
-  skip_quickci:
-    description: "Skip quickci."
+    default: "https://download.pytorch.org/whl/cu121"
+  install_torch:
+    description: "Install torch/torchvision/torchaudio before ComfyUI requirements."
     required: false
     default: "true"
+  use_gpu:
+    description: "Docker GPU mode: true, false, or auto. auto probes whether docker can run the image with --gpus all."
+    required: false
+    default: "auto"
+  docker_image:
+    description: "Local Docker image tag for the contract runner."
+    required: false
+    default: "notch-contract-ci:local"
+  docker_no_cache:
+    description: "Build the Docker image with --no-cache."
+    required: false
+    default: "false"
+  artifact_dir:
+    description: "Directory under the caller workspace where run artifacts are written."
+    required: false
+    default: "notch-contract-artifacts"
+  upload_artifacts:
+    description: "Upload artifact_dir with actions/upload-artifact."
+    required: false
+    default: "true"
+  expected_node_classes:
+    description: "Comma-separated Notch node classes expected in /object_info."
+    required: false
+    default: "NotchSingleInput,NotchOutputNode,SpoutReceiver"
+
 runs:
   using: "composite"
   steps:
-    - name: '[Universal] Checkout'
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-
-    ############################################################
-    ##                      Mac/Linux Steps                   ##
-    ##           ______________                               ##
-    ##          /             /|              _nnnn_          ##
-    ##         /             / |             dGGGGMMb         ##
-    ##        /____________ /  |            @p~qp~~qMb        ##
-    ##       | ___________ |   |            M|@||@) M|        ##
-    ##       ||           ||   |            @,----.JM|        ##
-    ##       ||           ||   |           JS^\__/  qKL       ##
-    ##       ||           ||   |          dZP        qKRb     ##
-    ##       ||___________||   |         dZP          qKKb    ##
-    ##       |   _______   |  /         fZP            SMMb   ##
-    ##      /|  (_______)  | /          HZM            MMMM   ##
-    ##     ( |_____________|/           FqM            MMMM   ##
-    ##      \                         __| ".        |\dS"qML  ##
-    ##  .=======================.     |    `.       | `' \Zq  ##
-    ##  | ::::::::::::::::  ::: |    _)      \.___.,|     .'  ##
-    ##  | ::::::::::::::[]  ::: |    \____   )MMMMMP|   .'    ##
-    ##  |   -----------     ::: |         `-'       `--'      ##
-    ##  `-----------------------'                             ##
-    ############################################################
-    - name: '[Unix] Auth to GCS'
-      uses: "google-github-actions/auth@v2"
-      if: ${{ inputs.os != 'windows' }}
-      with:
-        credentials_json: "${{ inputs.google_credentials }}"
-
-    # - name: '[Unix] Setup Conda'
-    #   uses: conda-incubator/setup-miniconda@v3.0.3
-    #   if: ${{ inputs.os != 'windows' && hashFiles('${{ env.HOME }}/miniconda3/envs/gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}/bin/pip') == '' }}
-    #   with:
-    #     activate-environment: gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-    #     miniconda-version: "latest"
-    #     auto-activate-base: false
-    #     python-version: ${{ inputs.python_version }}
-    #   continue-on-error: true
-
-    - name: '[Unix-Mac-Only] Install Pytorch nightly'
-      if: ${{ inputs.os == 'macos' && inputs.torch_version == 'nightly' }}
-      shell: bash -el {0}
+    - name: "[Docker] Prepare artifact directory"
+      shell: pwsh
       run: |
-        conda env list
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        conda install pytorch-nightly::pytorch torchvision torchaudio -c pytorch-nightly
+        $ErrorActionPreference = "Stop"
+        $artifactRel = "${{ inputs.artifact_dir }}"
+        if ([string]::IsNullOrWhiteSpace($artifactRel) -or $artifactRel -eq "." -or $artifactRel -eq ".." -or [System.IO.Path]::IsPathRooted($artifactRel) -or $artifactRel.Contains("..") -or $artifactRel.Contains("\") -or $artifactRel.Contains(":")) {
+          Write-Error "artifact_dir must be a simple path under GITHUB_WORKSPACE: $artifactRel"
+          exit 2
+        }
+        $artifactPath = Join-Path $env:GITHUB_WORKSPACE $artifactRel
+        if (Test-Path -LiteralPath $artifactPath) {
+          Remove-Item -LiteralPath $artifactPath -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $artifactPath | Out-Null
 
-    - name: '[Unix-Mac-Only] Install Pytorch stable'
-      if: ${{ inputs.os == 'macos' && inputs.torch_version == 'stable' }}
-      shell: bash -el {0}
+    - name: "[Docker] Build contract runner image"
+      shell: pwsh
       run: |
-        conda env list
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        conda install pytorch::pytorch torchvision torchaudio -c pytorch
-    
-    - name: '[Unix-Linux-Only] Install Pytorch nightly'
-      if: ${{ inputs.os == 'linux' && inputs.torch_version == 'nightly' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        #conda install pytorch torchvision torchaudio pytorch-cuda=${{ inputs.cuda_version }} -c pytorch-nightly -c nvidia
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-
-    - name: '[Unix-Linux-Only] Install Pytorch stable'
-      if: ${{ inputs.os == 'linux' && inputs.torch_version == 'stable' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        conda install pytorch torchvision torchaudio pytorch-cuda=${{ inputs.cuda_version}} -c pytorch -c nvidia
-
-    - name: '[Unix] Install Pytorch specific version'
-      if: ${{ inputs.os == 'macos' && inputs.torch_version == 'specific' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        echo "Run specific torch install command"
-        ${{ inputs.specific_torch_install }}
-
-    - name: '[Unix] Install dependencies'
-      if: ${{ inputs.os != 'windows' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        which pip
-        pip install -r requirements.txt
-        pip install -U comfy-cli
-
-    - name: '[Unix] Check conda environment'
-      if: ${{ inputs.os != 'windows' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        which python
-        echo "#### Python Version ####"
-        python --version
-        echo "#### Pip Version ####"
-        pip --version
-        echo "#### Conda Info Version ####"
-        conda info
-        conda list
-
-    - name: '[Unix] Download models'
-      if: ${{ inputs.os != 'windows' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        cd ${{ github.action_path }}
-        which pip
-        pip install -r requirements.txt
-        echo "will run default-models prep"
-        python default-models-prep.py --cache-directory ~/.cache/comfy-actions-runner/modelcache --live-directory "$GITHUB_WORKSPACE/models"
-        echo "default-models-prep done, will copy workflow images"
-        cp -r "${{ github.action_path }}"/workflow-images/* "$GITHUB_WORKSPACE/input"
-        echo "workflow images copied"
-
-    - name: '[Unix] Run ComfyUI quick test'
-      if: ${{ inputs.os != 'windows' && inputs.skip_quick_ci != 'true' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        python main.py --quick-test-for-ci
-
-    - name: '[Unix] Run ComfyUI'
-      if: ${{ inputs.os != 'windows' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        python main.py ${{inputs.comfyui_flags}} > application.log 2>&1 &
-
-    - name: '[Unix] Check if the server is running'
-      if: ${{ inputs.os != 'windows' }}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        cd ${{ github.action_path }}
-        python poll_server_start.py > application.log 2>&1
-      shell: bash -el {0}
-
-    - name: '[Unix] Get Details and Run Python Action'
-      id: unix_action
-      if: ${{ inputs.os != 'windows' }}
-      shell: bash -el {0}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        if [ "${{ inputs.use_prior_commit }}" == "true" ]; then
-          COMMIT_HASH=$(git rev-parse HEAD^)
-        else
-          COMMIT_HASH=$(git rev-parse HEAD)
-        fi
-        echo "Commit time: $TIMESTAMP"
-        echo "Commit title: $MESSAGE"
-        echo "Commit hash: $COMMIT_HASH"
-        BRANCH_NAME="${{ github.ref_name }}"
-        PRNUMBER="${{ github.event.pull_request.number }}"
-        if [ -n "$PRNUMBER" ]; then
-          BRANCH_NAME="$PRNUMBER/merge"
-          git fetch origin pull/$PRNUMBER/head
-          git checkout FETCH_HEAD
-          COMMIT_HASH=$(git rev-parse HEAD)
-        fi
-        TIMESTAMP=$(git show -s --format=%cI $COMMIT_HASH)
-        MESSAGE=$(git show -s --format=%s $COMMIT_HASH)
-
-        cd ${{ github.action_path }}
-        echo "Running workflows: ${{ inputs.workflow_filenames }}"
-        python action.py \
-          --comfy-workflow-names ${{ inputs.workflow_filenames }} \
-          --github-action-workflow-name "${{ github.workflow }}" \
-          --os "${{ inputs.os }}" \
-          --run-id "${{ github.run_id }}" \
-          --job-id "${{ github.job }}" \
-          --job-trigger-user "${{ github.actor }}" \
-          --gsc-bucket-name "${{ inputs.gcs_bucket_name }}" \
-          --workspace-path "${{ github.workspace }}" \
-          --output-file-prefix ${{ inputs.output_prefix }} \
-          --repo "${{ github.repository }}" \
-          --comfy-run-flags "'${{ inputs.comfyui_flags }}'" \
-          --python-version "${{ inputs.python_version }}" \
-          --torch-version "${{ inputs.torch_version }}" \
-          --cuda-version "${{ inputs.cuda_version }}" \
-          --commit-hash "$COMMIT_HASH" \
-          --commit-time "$TIMESTAMP" \
-          --commit-message "$MESSAGE" \
-          --branch-name "$BRANCH_NAME" \
-          --api-endpoint "${{ inputs.api_endpoint }}"
-
-    - name: '[Unix] Upload Output Files'
-      uses: actions/upload-artifact@v4
-      if: ${{ inputs.os != 'windows' && ( success() || failure() ) }}
-      with:
-        name: output-files-${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-        path: ${{ github.workspace }}/output/**
-
-    - name: '[Unix] Upload log file to GCS'
-      if: ${{ inputs.os != 'windows' && ( success() || failure() ) }}
-      id: unix_upload-log-files
-      uses: google-github-actions/upload-cloud-storage@v2
-      with:
-        process_gcloudignore: false
-        path: ${{ github.workspace }}/application.log
-        destination: ${{ inputs.gcs_bucket_name }}/logs/${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-
-    - name: '[Unix] Upload log file'
-      if: ${{ inputs.os != 'windows' && ( success() || failure() ) }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-logs-${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-        path: ${{ github.workspace }}/application.log
-
-    - name: '[Unix] Cleanup output files only'
-      if: ${{ inputs.os != 'windows' && ( success() || failure() ) }}
-      shell: bash -el {0}
-      run: rm -rf ${{ github.workspace }}/*
-
-
-    #####################################################################################
-    ##                           Windows Steps (F**k powershell)                       ##
-    ##                                                                                 ##
-    ##               _.-;;-._      _                                                   ##
-    ##        '-..-'|   ||   |    | |                                                  ##
-    ##        '-..-'|_.-;;-._|    | |===( )   //////                                   ##
-    ##        '-..-'|   ||   |    |_|   |||  | o o|                                    ##
-    ##        '-..-'|_.-''-._|           ||| ( c  )                  ____              ##
-    ##                                    ||| \= /                  ||   \_            ##
-    ##                                     ||||||                   ||     |           ##
-    ##                                     ||||||                ...||__/|-"           ##
-    ##                                     ||||||             __|________|__           ##
-    ##                                       |||             |______________|          ##
-    ##                                       |||             || ||      || ||          ##
-    ##                                       |||             || ||      || ||          ##
-    ##  -------------------------------------|||-------------||-||------||-||-------   ##
-    ##                                       |__>            || ||      || ||          ##
-    ##                                                                                 ##
-    ##                                                                                 ##
-    #####################################################################################
-
-
-    - name: '[Win] Auth to GCS'
-      uses: "google-github-actions/auth@v2"
-      if: ${{ inputs.os == 'windows' }}
-      with:
-        credentials_json: "${{ inputs.google_credentials }}"
-
-    - name: '[Win] Setup Conda'
-      uses: conda-incubator/setup-miniconda@v3.0.3
-      if: ${{ inputs.os == 'windows' }}
-      with:
-        activate-environment: gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        miniconda-version: "latest"
-        python-version: ${{ inputs.python_version }}
-      continue-on-error: true
-
-    # This step is created because the Conda setup step fails everytime.
-    - name: '[Win-Only] Create Conda environment if not exists'
-      if: ${{ inputs.os == 'windows' }}
-      shell: powershell
-      run: |
-        if (-not (conda env list | Select-String -Pattern "gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}")) {
-          conda create -n gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }} python=${{ inputs.python_version }} -y
+        $ErrorActionPreference = "Stop"
+        $dockerArgs = @("build")
+        if ("${{ inputs.docker_no_cache }}" -eq "true") {
+          $dockerArgs += "--no-cache"
+        }
+        $dockerArgs += @("-t", "${{ inputs.docker_image }}", "${{ github.action_path }}")
+        & docker @dockerArgs
+        if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
         }
 
+    - name: "[Docker] Run Notch contract checks"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $artifactHost = Join-Path $env:GITHUB_WORKSPACE "${{ inputs.artifact_dir }}"
+        $gpuArgs = @()
 
-    - name: '[Win-Only] Install Pytorch nightly'
-      if: ${{ inputs.os == 'windows' && inputs.torch_version == 'nightly'}}
-      shell: powershell
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Get-Command pip3
-        pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-
-    - name: '[Win-Only] Install Pytorch stable'
-      if: ${{ inputs.os == 'windows' && inputs.torch_version =='stable' }}
-      shell: powershell
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Get-Command pip3
-        pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-    
-    - name: '[Win] Install Pytorch specific version'
-      if: ${{ inputs.os == 'windows' && inputs.torch_version == 'specific' }}
-      shell: powershell
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Write-Output "Run specific torch install command"
-        ${{ inputs.specific_torch_install }}
-
-    - name: '[Win] Install dependencies'
-      if: ${{ inputs.os == 'windows' }}
-      shell: powershell
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        pip install -r requirements.txt
-        pip install -U comfy-cli
-        conda install google-cloud-storage -y # This is because some fcking how, installing google-cloud-storage using pip has permission error on Windows using python 3.12
-
-    - name: "[Win] Check conda environment"
-      if: ${{ inputs.os == 'windows' }}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Get-Command python
-        Write-Output "#### Python Version ####"
-        python --version
-        Write-Output "#### Pip Version ####"
-        pip --version
-        Write-Output "#### Conda Info ####"
-        conda info
-        conda list
-      shell: powershell
-
-    - name: '[Win] Download models'
-      if: ${{ inputs.os == 'windows' }}
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        cd $Env:GITHUB_ACTION_PATH
-        pip install -r requirements.txt
-        python default-models-prep.py --cache-directory C:\actions-runner\modelcache --live-directory "$Env:GITHUB_WORKSPACE/models"
-        Copy-Item -Path "$Env:GITHUB_ACTION_PATH\workflow-images\*" -Destination "$Env:GITHUB_WORKSPACE\input" -Recurse
-      shell: powershell
-
-    - name: '[Win] Run ComfyUI quick test'
-      if: ${{ inputs.os == 'windows' && inputs.skip_quick_ci != 'true' }}
-      shell: powershell
-      run: |
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        python $Env:GITHUB_WORKSPACE/main.py --quick-test-for-ci
-        Write-Output "(Temporary) fixing torch nightly bug"
-        python $Env:GITHUB_WORKSPACE/fix_torch.py
-
-    - name: '[Win] Run ComfyUI'
-      if: ${{ inputs.os == 'windows' }}
-      shell: powershell
-      run: |
-        $envGithubWorkspace = $Env:GITHUB_WORKSPACE
-        Write-Output "##############################"
-        Write-Output $envGithubWorkspace
-        Write-Output "##############################"
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Start-Process powershell -ArgumentList "-File", "${{ github.action_path }}\start-server.ps1", "-GITHUB_WORKSPACE", "`"$envGithubWorkspace`"", "-CondaEnv", "`"gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}`"", "-RunFlags", "`"${{ inputs.comfyui_flags}}`""
-
-    - name: '[Win] Check if the server is running'
-      if: ${{ inputs.os == 'windows' }}
-      run: |
-        cd $Env:GITHUB_ACTION_PATH
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        python poll_server_start.py
-      shell: powershell
-
-    - name: '[Win] Get Details and Run Python Action'
-      id: windows_action
-      if: ${{ inputs.os == 'windows' }}
-      shell: powershell
-      run: |
-        if ( "${{ inputs.use_prior_commit }}" -eq "true" ) {
-          $commit_hash = git rev-parse HEAD^
-        } else {
-          $commit_hash = git rev-parse HEAD
+        if ("${{ inputs.use_gpu }}" -eq "true") {
+          $gpuArgs = @("--gpus", "all")
         }
-        $branch_name = "${{ github.ref_name }}"
-        $pr_number = "${{ github.event.pull_request.number }}"
-        if ( $pr_number -ne "" ) {
-          $branch_name = "$pr_number/merge"
-          git fetch origin pull/$pr_number/head
-          git checkout FETCH_HEAD
-          $commit_hash = git rev-parse HEAD
+        elseif ("${{ inputs.use_gpu }}" -eq "auto") {
+          if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            & docker run --rm --gpus all --entrypoint nvidia-smi "${{ inputs.docker_image }}" *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $gpuArgs = @("--gpus", "all")
+              Write-Host "Docker GPU probe passed; running with --gpus all."
+            }
+            else {
+              Write-Host "Docker GPU probe failed; running without --gpus all."
+            }
+          }
+          else {
+            Write-Host "nvidia-smi not found on host; running without --gpus all."
+          }
         }
-        $timestamp = git show -s --format=%cI $commit_hash
-        $message = git show -s --format=%s $commit_hash
+        elseif ("${{ inputs.use_gpu }}" -ne "false") {
+          Write-Error "Unsupported use_gpu value: ${{ inputs.use_gpu }}"
+          exit 2
+        }
 
-        # Special cleanup/escape for variable names
-        $branch_name = $branch_name -replace '"', '\"'
-        $message = $message -replace '"', '\"'
-        $actor = "${{ github.actor }}"
-        $actor = $actor -replace '"', '\"'
+        $actionPath = "${{ github.action_path }}"
+        $dockerArgs = @(
+          "run", "--rm"
+        ) + $gpuArgs + @(
+          "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
+          "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
+          "-e", "GITHUB_RUN_ATTEMPT=$env:GITHUB_RUN_ATTEMPT",
+          "-e", "GITHUB_REF_NAME=$env:GITHUB_REF_NAME",
+          "-v", "$($env:GITHUB_WORKSPACE):/workspace",
+          "-v", "$($actionPath):/action:ro",
+          "-v", "$($artifactHost):/artifacts",
+          "${{ inputs.docker_image }}",
+          "--mode", "${{ inputs.mode }}",
+          "--comfyui-repository", "${{ inputs.comfyui_repository }}",
+          "--comfyui-ref", "${{ inputs.comfyui_ref }}",
+          "--extension-repository", "${{ inputs.extension_repository }}",
+          "--extension-ref", "${{ inputs.extension_ref }}",
+          "--workspace", "/workspace",
+          "--artifacts", "/artifacts",
+          "--host", "127.0.0.1",
+          "--port", "${{ inputs.port }}",
+          "--timeout", "${{ inputs.timeout }}",
+          "--comfyui-flags=${{ inputs.comfyui_flags }}",
+          "--torch-index-url", "${{ inputs.torch_index_url }}",
+          "--install-torch", "${{ inputs.install_torch }}",
+          "--expected-node-classes", "${{ inputs.expected_node_classes }}"
+        )
+        & docker @dockerArgs
+        if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+        }
 
-        cd $Env:GITHUB_ACTION_PATH
-        conda activate gha-comfyui-${{ inputs.python_version }}-${{ inputs.torch_version }}
-        Write-Host "Running workflows: ${{ inputs.workflow_filenames }}"
-        python action.py `
-          --comfy-workflow-names "${{ inputs.workflow_filenames }}" `
-          --github-action-workflow-name "${{ github.workflow }}" `
-          --os "${{ inputs.os }}" `
-          --run-id "${{ github.run_id }}" `
-          --job-id "${{ github.job }}" `
-          --job-trigger-user $actor `
-          --gsc-bucket-name "${{ inputs.gcs_bucket_name }}" `
-          --workspace-path "${{ github.workspace }}" `
-          --output-file-prefix "${{ inputs.output_prefix }}" `
-          --repo "${{ github.repository }}" `
-          --comfy-run-flags "'${{ inputs.comfyui_flags }}'" `
-          --python-version "${{ inputs.python_version }}" `
-          --torch-version "${{ inputs.torch_version }}" `
-          --cuda-version "${{ inputs.cuda_version }}" `
-          --commit-hash "$commit_hash" `
-          --commit-time "$timestamp" `
-          --commit-message $message `
-          --branch-name $branch_name `
-          --api-endpoint "${{ inputs.api_endpoint }}"
-        (Get-ChildItem -Force -Path "${{ github.workspace }}/output").FullName
-        cat "${{ github.workspace }}/application.log"
-    # Note the Get-ChildItem mess is powershell for "ls -la" for debug
-
-    - name: '[Win] Upload Output Files'
+    - name: "[Docker] Upload contract artifacts"
+      if: ${{ inputs.upload_artifacts == 'true' && always() }}
       uses: actions/upload-artifact@v4
-      if: ${{ inputs.os == 'windows' && ( success() || failure() ) }}
       with:
-        name: output-files-${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-        path: ${{ github.workspace }}/output/**
-
-    - name: '[Win] Upload log file to GCS'
-      if: ${{ ( success() || failure() ) && inputs.os == 'windows'}}
-      id: win_upload-log-files
-      uses: google-github-actions/upload-cloud-storage@v2
-      with:
-        process_gcloudignore: false
-        path: ${{ github.workspace }}/application.log
-        destination: ${{ inputs.gcs_bucket_name }}/logs/${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-
-    - name: '[Win] Upload log file'
-      uses: actions/upload-artifact@v4
-      if: ${{ inputs.os == 'windows' && ( success() || failure() ) }}
-      with:
-        name: app-logs-${{ github.job }}-${{ inputs.os }}-${{ inputs.python_version }}-${{ inputs.cuda_version }}-${{ inputs.torch_version }}-${{ inputs.workflow_name }}-run${{ github.run_id }}
-        path: ${{ github.workspace }}/application.log
-
-    - name: '[Win] Cleanup output files only'
-      if: ${{ inputs.os == 'windows' && ( success() || failure() ) }}
-      shell: powershell
-      run: Remove-Item -Path "${{ github.workspace }}/output/*" -Recurse -Force
+        name: notch-contract-${{ inputs.mode }}-${{ github.run_id }}
+        path: ${{ github.workspace }}/${{ inputs.artifact_dir }}

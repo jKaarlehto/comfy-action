@@ -4,7 +4,8 @@ on:
   push:
     paths:
       - 'action.yml'
-      - 'action_yaml_checker.py'
+      - 'Dockerfile'
+      - 'scripts/**'
       - '.github/workflows/verify-action.yml'
   workflow_dispatch: 
 
@@ -30,11 +31,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: 3.11
-    
-    - name: Install dependencies
-      run: |
-        pip install -r requirements-dev.txt
-        
-    - name: Run action_yaml_checker.py
-      run: python action_yaml_checker.py action.yml
+
+    - name: Check runner script syntax
+      run: python -m py_compile scripts/notch_contract_ci.py
 
