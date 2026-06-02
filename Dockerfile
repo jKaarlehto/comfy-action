@@ -6,7 +6,9 @@ FROM nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-ENV PIP_NO_CACHE_DIR=1
+# Reuse downloaded wheels across both jobs via the /cache/pip bind mount the
+# action provides. If the mount is absent the cache is just container-local.
+ENV PIP_CACHE_DIR=/cache/pip
 
 # Python 3.13 is ComfyUI's recommended interpreter; install it from deadsnakes
 # (Ubuntu 24.04 ships 3.12). The venv module bootstraps pip via ensurepip.

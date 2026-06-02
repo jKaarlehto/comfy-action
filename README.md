@@ -93,6 +93,7 @@ checks on a floating branch.
 | `docker_image` | `notch-contract-ci:local` | Local image tag. |
 | `docker_no_cache` | `false` | Build with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
+| `pip_cache_dir` | `notch-contract-pip-cache` | Shared pip wheel cache under the runner workspace, mounted at `/cache/pip` and reused across both jobs and between runs. |
 | `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-initialization expectation. |
 

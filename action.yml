@@ -62,6 +62,10 @@ inputs:
     description: "Directory under the caller workspace where run artifacts are written."
     required: false
     default: "notch-contract-artifacts"
+  pip_cache_dir:
+    description: "Simple path under the self-hosted runner workspace, mounted as /cache/pip and shared across both jobs so downloaded wheels are reused. Persists between runs (not cleaned)."
+    required: false
+    default: "notch-contract-pip-cache"
   upload_artifacts:
     description: "Upload artifact_dir with actions/upload-artifact."
     required: false
@@ -90,6 +94,21 @@ runs:
         }
         New-Item -ItemType Directory -Force -Path $artifactPath | Out-Null
 
+    - name: "[Docker] Prepare shared pip cache directory"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $pipCacheRel = "${{ inputs.pip_cache_dir }}"
+        if ([string]::IsNullOrWhiteSpace($pipCacheRel) -or $pipCacheRel -eq "." -or $pipCacheRel -eq ".." -or [System.IO.Path]::IsPathRooted($pipCacheRel) -or $pipCacheRel.Contains("..") -or $pipCacheRel.Contains("\") -or $pipCacheRel.Contains(":")) {
+          Write-Error "pip_cache_dir must be a simple path under the runner workspace: $pipCacheRel"
+          exit 2
+        }
+        # RUNNER_WORKSPACE persists across both jobs and between runs on a
+        # self-hosted runner, and sits outside the per-run-cleaned checkout.
+        $pipCachePath = Join-Path $env:RUNNER_WORKSPACE $pipCacheRel
+        New-Item -ItemType Directory -Force -Path $pipCachePath | Out-Null
+        Write-Host "Shared pip cache: $pipCachePath -> /cache/pip"
+
     - name: "[Docker] Build contract runner image"
       shell: pwsh
       run: |
@@ -109,6 +128,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         $artifactHost = Join-Path $env:GITHUB_WORKSPACE "${{ inputs.artifact_dir }}"
+        $pipCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.pip_cache_dir }}"
         $gpuArgs = @()
 
         if ("${{ inputs.use_gpu }}" -eq "true") {
@@ -145,6 +165,7 @@ runs:
           "-v", "$($env:GITHUB_WORKSPACE):/workspace",
           "-v", "$($actionPath):/action:ro",
           "-v", "$($artifactHost):/artifacts",
+          "-v", "$($pipCacheHost):/cache/pip",
           "${{ inputs.docker_image }}",
           "--mode", "${{ inputs.mode }}",
           "--comfyui-repository", "${{ inputs.comfyui_repository }}",
