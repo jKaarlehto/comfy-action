@@ -37,6 +37,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN ln -sf /usr/bin/python3.13 /usr/local/bin/python
 
+# Bake torch (the heaviest, slowest-changing dependency) into its own early
+# layer so Docker caches it: it is re-downloaded only when this line changes,
+# not every run. Keep TORCH_INDEX_URL in sync with the action's torch_index_url
+# input (NVIDIA stable cu130). The runtime venv inherits this via
+# system-site-packages and skips re-installing torch.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+RUN python -m ensurepip --upgrade \
+    && python -m pip install --no-cache-dir --upgrade pip wheel setuptools \
+    && python -m pip install --no-cache-dir torch torchvision torchaudio --extra-index-url ${TORCH_INDEX_URL}
+
 WORKDIR /runner
 # Bake the runner and the mock client source so the image is self-contained; the
 # action checkout is also mounted at /action at runtime.

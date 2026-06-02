@@ -587,10 +587,19 @@ Clean every run:
 
 Safe to cache or reuse:
 
-- Docker image layers.
-- Pip wheel/download cache mounted at `/cache/pip`. The virtual environment is
-  still rebuilt every run; only package downloads are reused. `pip-freeze.txt`
-  and `python-env.json` record the exact installed environment.
+- Docker image layers. **torch (and its full CUDA dependency closure) is baked
+  into an early image layer** (`pip install torch torchvision torchaudio`), so
+  the multi-GB download — torch plus every `nvidia-*-cu13` wheel (cuBLAS, cuDNN,
+  cuFFT, cuSPARSE, cuSOLVER, NCCL, nvrtc, …), `triton`, and `cuda-bindings` — is
+  pulled only when that Dockerfile line changes, not every run. The layer sits
+  before any code `COPY`, so editing the runner or mock client does not bust it.
+  The runtime venv inherits it via system-site-packages and skips re-installing
+  torch.
+- Pip wheel/download cache mounted at `/cache/pip`, shared across both jobs. The
+  virtual environment is still rebuilt every run; only package downloads are
+  reused. This covers the **ComfyUI and extension `requirements.txt`** deps,
+  which vary by `comfyui_ref` and so are not baked. `pip-freeze.txt` and
+  `python-env.json` record the exact installed environment.
 - Optional model cache for future non-initialization tests, but not the phase-1
   extension-initialization check.
 

@@ -150,7 +150,9 @@ def git_commit(runner: CommandRunner, directory: Path) -> str:
 
 def create_venv(runner: CommandRunner, workdir: Path) -> tuple[Path, Path]:
     env_dir = workdir / "venv"
-    venv.EnvBuilder(with_pip=True, clear=True).create(env_dir)
+    # system_site_packages=True so the venv inherits torch baked into the image
+    # layer; the runtime torch install is then skipped (see install_python_deps).
+    venv.EnvBuilder(with_pip=True, clear=True, system_site_packages=True).create(env_dir)
     bin_dir = env_dir / ("Scripts" if os.name == "nt" else "bin")
     python = bin_dir / ("python.exe" if os.name == "nt" else "python")
     pip = bin_dir / ("pip.exe" if os.name == "nt" else "pip")
@@ -168,20 +170,31 @@ def install_python_deps(
     install_torch: bool,
 ) -> None:
     if install_torch:
-        runner.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "torch",
-                "torchvision",
-                "torchaudio",
-                "--extra-index-url",
-                torch_index_url,
-            ],
+        # Torch is baked into the image layer and visible via system-site-packages,
+        # so skip the (multi-GB) install when it already imports. Only install if
+        # absent — e.g. a base image without the bake layer.
+        already = runner.run(
+            [str(python), "-c", "import torch, torchvision, torchaudio"],
             log_name="python-install.log",
+            check=False,
         )
+        if already.returncode == 0:
+            print("torch already present (baked image layer); skipping torch install")
+        else:
+            runner.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                    "--extra-index-url",
+                    torch_index_url,
+                ],
+                log_name="python-install.log",
+            )
     comfy_requirements = comfy_dir / "requirements.txt"
     if comfy_requirements.is_file():
         runner.run([str(pip), "install", "-r", str(comfy_requirements)], log_name="python-install.log")
