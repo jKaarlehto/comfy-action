@@ -237,3 +237,74 @@ stub matrix: pass=18 fail=0 skip=0 error=0   ← Layer 1 exact
   lifecycle, disk/http/cuda delivery, the server-side delivery negatives, and the
   remote topology (docker-compose) for the 6 remote deliveries. Output
   feature/generation policies remain out of scope.
+
+## 9. v2 Diagnostics — WS assertions and per-case Notch logs (planned)
+
+v2 cases execute workflows, so each case gains two diagnostic channels. Both are
+**structured, never regex over the server log** — the ComfyUI log format is not a
+stable contract, so the matrix must not assert on parsed log text. Raw log is
+kept only as a per-case byte-offset slice (`server.log`) for human context.
+
+### 9a. WebSocket lifecycle assertions (client-side, no new server work)
+
+The mock client already holds the `/ws` connection and the C++ interface already
+parses lifecycle events keyed by `prompt_id` (`ParseWebSocketEvent` →
+`EventExecutionSuccess` / `EventExecutionError` / `EventExecutionInterrupted` /
+`EventExecuted`). Per execution case:
+
+1. Submit via `/notch/inject`; read `prompt_id` from the inject response
+   (`ParseWorkflowSubmissionResponse`).
+2. Wait for the matching terminal event on `/ws`.
+3. Assert it: `execution_success` for positive cases; `execution_error` (with
+   `exception_type`, `node_id`, `traceback`) for cases that must fail at runtime.
+4. Record the lifecycle to `websocket.jsonl` and the terminal outcome to
+   `case.json`.
+
+Pre-queue validation failures arrive as structured JSON in the inject HTTP
+response (`error`, `node_errors`) — also no log parsing.
+
+### 9b. Per-case Notch diagnostics (warnings/errors as context)
+
+A case can **pass while the server emitted warnings** (e.g. a cache miss, a
+proceed-without-X path). Those warnings are valuable context, captured
+structurally via a planned **ComfyUI-Notch** feature (extension-side, documented
+in `docs/notch_integration_guide.md` *when built* — not before):
+
+- **`NOTCH_CI` env flag** (distinct from `NOTCH_DEBUG`, which is DEBUG-level
+  stdout spew): attaches a structured capture handler at `WARNING+` to the
+  `"Notch"` logger (the single facade in `utils/logger.py`). It buffers
+  `LogRecord` fields — `{level, logger/module/func, message, prompt_id, ts,
+  exc_info}` — as objects, no text parsing.
+- **`prompt_id` contextvar** set at inject/execution start; the handler stamps
+  each record. Reliable on the execution thread (ComfyUI runs prompts serially);
+  background-thread logs (drop-on-full side effects) stamp `prompt_id=null`,
+  best-effort.
+- **Pull endpoint `GET /notch/diagnostics?prompt_id=…`** returns that prompt's
+  buffered records. The matrix queries it after each case and writes them to the
+  case directory (e.g. `notch-diagnostics.json`). Buffer is bounded (last-N
+  prompts / cleared on inject) so a long-lived server does not grow unbounded.
+- Facade tweak: `warning()`/`error()` accept `exc_info` so tracebacks attach
+  (today only `exception()` carries them).
+
+**Consumption rule:** diagnostics are **context, not pass/fail**. A case's
+verdict comes from its expected outcome (selection / gate / WS terminal event);
+the diagnostics are attached evidence. The matrix may optionally flag an
+*unexpected* error-level record on an otherwise-passing case, but warnings never
+fail a case on their own.
+
+### 9c. Prerequisite review sweep (extension-side)
+
+For 9b's signal to be meaningful, ComfyUI-Notch's existing log sites need a level
+pass (separate work, judgement per site — a scout-orchestrator-editor sweep, not
+find/replace):
+
+- **Promote to `warning`:** missing required file, cache miss/eviction, CUDA
+  unavailable-but-proceeding, any "proceeding without X" branch.
+- **Promote to `error`/`exception` (with `exc_info`):** swallowed exceptions that
+  are not intentional hot-path drops.
+- **Leave as-is:** intentional drop-on-full async side effects and sub-threshold
+  perf logs (per the project's existing logging rules).
+
+The codebase already routes through the logger (only ~3 cosmetic `print()`s), so
+this is a level-correctness pass over ~65 contract-relevant branch points and the
+swallowing `except` handlers, not a print-to-log migration.
