@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 
-NOTCH_NODE_CLASSES = ["NotchSingleInput", "NotchOutputNode", "SpoutReceiver"]
+# SpoutReceiver is intentionally omitted from the Docker smoke expectation.
+# SpoutGL is Windows-only; Linux CI validates the cross-platform node surface.
+NOTCH_NODE_CLASSES = ["NotchSingleInput", "NotchOutputNode"]
 DEFAULT_COMFY_LISTEN_ADDRESS = "127.0.0.1"
 DEFAULT_COMFY_PORT = 8188
 DEFAULT_COMFY_SCHEME = "http"

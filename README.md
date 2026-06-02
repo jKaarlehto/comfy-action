@@ -5,8 +5,8 @@ Docker-based contract checks for `ComfyUI-Notch`.
 This action is meant to be used from the `ComfyUI-Notch` repository. It builds a
 local Docker image, starts a pinned ComfyUI checkout inside the container,
 installs the caller's `ComfyUI-Notch` checkout into `custom_nodes`, compiles the
-C++ client interface, and verifies that `/object_info` exposes the Notch node
-classes.
+C++ client interface, and verifies that `/object_info` exposes the cross-platform
+Notch node classes.
 
 ## What It Checks
 
@@ -18,7 +18,7 @@ classes.
 - install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies;
 - build and run `cpp/notch_comfy_client`'s compile-check target;
 - start ComfyUI on `<listen_address>:<port>` and poll the same address;
-- assert `/object_info` contains `NotchSingleInput`, `NotchOutputNode`, and `SpoutReceiver`;
+- assert `/object_info` contains `NotchSingleInput` and `NotchOutputNode`;
 - write environment, compatibility, log, and result artifacts.
 
 `mode: integration` is reserved for the next phase. It currently runs the smoke
@@ -93,7 +93,7 @@ checks on a floating branch.
 | `docker_no_cache` | `false` | Build with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
 | `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode,SpoutReceiver` | Comma-separated `/object_info` keys to assert. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker smoke expectation. |
 
 ## Artifacts
 

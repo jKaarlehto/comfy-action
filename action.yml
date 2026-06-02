@@ -69,7 +69,8 @@ inputs:
   expected_node_classes:
     description: "Comma-separated Notch node classes expected in /object_info."
     required: false
-    default: "NotchSingleInput,NotchOutputNode,SpoutReceiver"
+    # SpoutReceiver is Windows-only; Docker smoke runs on Linux and checks the cross-platform nodes.
+    default: "NotchSingleInput,NotchOutputNode"
 
 runs:
   using: "composite"

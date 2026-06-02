@@ -79,7 +79,7 @@ CI product:
 
 - Pin each run to an explicit ComfyUI release tag, branch, or commit.
 - Verify that ComfyUI starts with `ComfyUI-Notch` installed.
-- Verify that `/object_info` contains the Notch node classes.
+- Verify that `/object_info` contains the cross-platform Notch node classes.
 - Verify that `cpp/notch_comfy_client` compiles.
 - Record the Python, CUDA, Docker-host, ComfyUI, and extension facts needed to
   reproduce a successful or failed run.
@@ -121,7 +121,7 @@ Keep configuration small:
 | `docker_no_cache` | `false` | Build the image with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Simple path under the caller workspace. Cleared at the start of each run. |
 | `upload_artifacts` | `true` | Upload `artifact_dir` with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode,SpoutReceiver` | Comma-separated class names expected in `/object_info`. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker smoke expectation. |
 
 Do not add arbitrary per-test selectors until the two modes prove too coarse.
 The integration suite should own its case table in source control so a run is
@@ -160,7 +160,6 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
    ```text
    NotchSingleInput
    NotchOutputNode
-   SpoutReceiver
    ```
 
 14. Write the smoke result and compatibility artifacts.
