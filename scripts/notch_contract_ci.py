@@ -472,6 +472,7 @@ def _render_cuda_summary(diag: dict[str, Any]) -> str:
         f"(available={runtime_facts.get('torch_cuda_available', '?')}) |",
         f"| ipc ns — container | `{diag.get('ipc_namespace', '?')}` |",
         f"| ipc ns — host ref | `{host.get('ipc_namespace') or '(not provided)'}` |",
+        f"| pid ns — container | `{diag.get('pid_namespace', '?')}` (shared with host when --pid=host) |",
         f"| cgroup ns — container | `{diag.get('cgroup_namespace', '?')}` |",
         f"| cgroup ns — host ref | `{host.get('cgroup_namespace') or '(not provided)'}` |",
         f"| /dev/shm total | `{diag.get('dev_shm_bytes_total', '?')}` bytes |",
@@ -515,6 +516,7 @@ def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: 
             return f"error: {exc}"
 
     diag["ipc_namespace"] = _readlink("/proc/self/ns/ipc")
+    diag["pid_namespace"] = _readlink("/proc/self/ns/pid")
     diag["cgroup_namespace"] = _readlink("/proc/self/ns/cgroup")
     try:
         diag["cgroup_path"] = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()

@@ -156,11 +156,15 @@ runs:
         }
 
         $actionPath = "${{ github.action_path }}"
-        # CUDA IPC on WSL2 GPU-PV is backed by host-level IPC primitives, so the
-        # default private IPC namespace breaks cudaIpcOpenMemHandle even between
-        # two processes in the same container (delivery_local runs the server and
-        # mock client side by side). --ipc=host shares the host IPC namespace;
-        # --cgroupns=host is the companion the NVIDIA WSL2 runtime guidance lists.
+        # CUDA IPC on WSL2 GPU-PV needs more than a shared IPC namespace. The
+        # mem-handle appears PID-sensitive on WDDM/GPU-PV: the importer must resolve
+        # the exporting process, so two processes in the same container still fail
+        # with InvalidResourceHandle under a private PID namespace. delivery_local
+        # runs the ComfyUI server and the mock client side by side, so it shares:
+        #   --ipc=host      host IPC (POSIX/SysV shm), not a virtualized layer
+        #   --pid=host      host PID namespace so the importer can map the exporter
+        #   --cgroupns=host companion the NVIDIA WSL2 runtime guidance lists
+        # (--privileged is a further lever to try if --pid=host alone is not enough.)
         if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
           & nvidia-smi *> (Join-Path $artifactHost "host-nvidia-smi.txt")
         }
@@ -180,7 +184,7 @@ runs:
         } catch {}
         $dockerArgs = @(
           "run", "--rm",
-          "--ipc=host", "--cgroupns=host",
+          "--ipc=host", "--pid=host", "--cgroupns=host",
           "-e", "EXPECT_IPC_HOST=1",
           "-e", "EXPECT_CGROUPNS_HOST=1",
           "-e", "HOST_IPC_NS=$hostIpcNs",
