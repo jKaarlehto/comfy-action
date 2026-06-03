@@ -61,10 +61,12 @@ add_executable(notch_mock_client
 target_link_libraries(notch_mock_client PRIVATE notch_mock_matrix ixwebsocket)
 if(CUDAToolkit_FOUND)
     target_sources(notch_mock_client PRIVATE src/transports/local_cuda_share_reader.cpp)
-    # Runtime API (cudart) is the production import path the Notch client uses;
-    # the driver library (cuda_driver) provides cuIpcOpenMemHandle for the
-    # reader's fallback open when the runtime open returns InvalidResourceHandle.
-    target_link_libraries(notch_mock_client PRIVATE CUDA::cudart CUDA::cuda_driver)
+    # Runtime API (cudart) ONLY — the production import path. cudart lazy-loads
+    # libcuda at first CUDA call, so the binary still loads on a GPU-less container
+    # (the remote client, which never makes a CUDA call). Linking the driver
+    # library (CUDA::cuda_driver) directly would hard-require libcuda.so.1 at load
+    # time and crash that client with "cannot open shared object file".
+    target_link_libraries(notch_mock_client PRIVATE CUDA::cudart)
     target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_RUNTIME=1)
 
     if(UNIX)
