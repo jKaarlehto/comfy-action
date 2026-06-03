@@ -1,0 +1,1 @@
+{"platform":"Linux-WSL2","comfyui_ref":"v0.23.0","comfyui_commit":"abc123","extension_commit":"def456","nvidia_smi":"hdr\nx\ny\n| RTX 5090 |","server_feature_flags":{"cuda_device_index":0}}

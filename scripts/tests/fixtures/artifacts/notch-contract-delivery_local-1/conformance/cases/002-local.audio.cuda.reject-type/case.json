@@ -1,0 +1,1 @@
+{"case_id":"local.audio.cuda.reject-type","title":"audio over cuda rejected by type","phase":"delivery-local","result":"fail","errors":["unexpected_accept"],"expected":{"selected":false},"actual":{"selected":true}}

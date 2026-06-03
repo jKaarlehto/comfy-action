@@ -1,0 +1,1 @@
+{"case_id":"local.image.cuda.deliver","title":"image over cuda delivers","phase":"delivery-local","result":"pass","errors":[],"expected":{"hash_match":true},"actual":{"hash_match":true}}
