@@ -1003,11 +1003,13 @@ void RunFilePathDeliveryCase(
             "output_node.delivery_done",
         };
     }
+    // Diagnostics are context, not a verdict gate (spec §9b: "diagnostics are
+    // context, not pass/fail"). missingDiagnostics is recorded as evidence but
+    // never fails a case.
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    const bool diagnosticsOk = state.queued && diagnosticsFetched && missingDiagnostics.empty();
-    const bool ok = state.queued && state.terminalSuccess && state.outputReady && hashMatch && diagnosticsOk;
+    const bool ok = state.queued && state.terminalSuccess && state.outputReady && hashMatch;
     if (!state.queued)
     {
         rec.errors.push_back("unexpected_reject");
@@ -1027,14 +1029,6 @@ void RunFilePathDeliveryCase(
     if (outputRead && !hashMatch)
     {
         rec.errors.push_back("output_hash_mismatch");
-    }
-    if (state.queued && !diagnosticsFetched)
-    {
-        rec.errors.push_back("ci_diagnostics_unavailable");
-    }
-    if (diagnosticsFetched && !missingDiagnostics.empty())
-    {
-        rec.errors.push_back("ci_diagnostics_missing_events");
     }
 
     std::ostringstream hashes;
@@ -1069,7 +1063,7 @@ void RunFilePathDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"hash_match\":true,\"diagnostics_complete\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"hash_match\":true}";
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
@@ -1270,12 +1264,12 @@ void RunCudaDeliveryCase(
             "output_node.delivery_done",
         };
     }
+    // Diagnostics are context, not a verdict gate (spec §9b). Recorded as
+    // evidence, never failing a case.
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    const bool diagnosticsOk = state.queued && diagnosticsFetched && missingDiagnostics.empty();
-    const bool ok = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk && hashMatch &&
-                    diagnosticsOk;
+    const bool ok = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk && hashMatch;
     if (!state.queued)
     {
         rec.errors.push_back("unexpected_reject");
@@ -1292,9 +1286,9 @@ void RunCudaDeliveryCase(
     {
         rec.errors.push_back("cuda_metadata_mismatch");
     }
-    if (!infoOk)
+    if (state.cudaStatus && !infoOk)
     {
-        rec.errors.push_back("cuda_status_missing");
+        rec.errors.push_back("cuda_info_unavailable");
     }
     if (state.cudaStatus && !cudaRead)
     {
@@ -1303,14 +1297,6 @@ void RunCudaDeliveryCase(
     if (cudaRead && !hashMatch)
     {
         rec.errors.push_back("output_hash_mismatch");
-    }
-    if (state.queued && !diagnosticsFetched)
-    {
-        rec.errors.push_back("ci_diagnostics_unavailable");
-    }
-    if (diagnosticsFetched && !missingDiagnostics.empty())
-    {
-        rec.errors.push_back("ci_diagnostics_missing_events");
     }
 
     std::ostringstream hashes;
@@ -1348,12 +1334,20 @@ void RunCudaDeliveryCase(
            << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
            << ",\"output_sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"expected_output_sha256\":" << CaseLogger::Quote(expectedOutputHash);
+    if (!cudaReadError.empty())
+    {
+        actual << ",\"cuda_read_error\":" << CaseLogger::Quote(cudaReadError);
+    }
+    if (!infoError.empty())
+    {
+        actual << ",\"cuda_info_error\":" << CaseLogger::Quote(infoError);
+    }
     if (!diagnosticsError.empty())
     {
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"hash_match\":true,\"diagnostics_complete\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"hash_match\":true}";
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
