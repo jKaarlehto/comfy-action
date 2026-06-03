@@ -89,6 +89,21 @@ deferred to an optional separate policy sub-suite (see §Scope).
   to **3 distinct sets**, all already used. So adding locality granularity (e.g.
   named-route disk) adds **0** selection cases as long as it reuses an existing
   reachable set. Locality's real cost is in delivery round-trip coverage.
+- **`cuda_device_index` is one server fact feeding two axes, not its own axis.**
+  The server publishes it (`extension.notch.cuda_device_index`, via
+  `notch_feature_facts()`), and two distinct readings come off it:
+  (1) its **existence** gates **A2** — `cuda_enabled()` is `cuda_device_index ≥ 0`
+  and `supported_output_transports()` adds `cuda` only then, so
+  `cuda ∈ S ⟺ cuda_device_index ≥ 0`;
+  (2) its **value/identity** feeds **A3** — per `features.md` §"The transports",
+  cuda reachability is "local + device-index match": the client includes `cuda`
+  in C only if it is local *and* its own device index equals the server's. That
+  match is computed client-side and baked into the reachable set before the
+  helper sees it (the helper never reads the index). The suite exercises the
+  existence side (the cuda skip gate + the share-status index used for
+  `cudaSetDevice`); the **device-mismatch** branch of C (server device N, client
+  can't see device N ⇒ cuda unreachable) is **untested**, as it needs a
+  multi-GPU host.
 - **A5 is a gate, not a transport.** Required-files is *user-actionable, not
   negotiable* (`notch_comfy_client.md` §File Manifest): a missing model file can't
   be auto-resolved. It is orthogonal to transport selection (not a term in
