@@ -188,17 +188,35 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         "feature_flags": env.get("server_feature_flags", {}),
     }
 
+    # Totals/result come from conformance-result.json, but fall back to
+    # compatibility-result.json (the python wrapper copies the conformance totals
+    # there and records the overall result) — important when the mock client
+    # exits before writing its own result file.
+    compat = _read_json(job_dir / "compatibility-result.json") or {}
     totals = result.get("totals", {}) if isinstance(result, dict) else {}
-    result_str = (result.get("result") if isinstance(result, dict) else "") or (
-        boot.get("result") if isinstance(boot, dict) else ""
-    ) or ""
+    if not totals and isinstance(compat, dict):
+        totals = compat.get("conformance", {}) or {}
+    # When no result file recorded totals, derive them from the case records so the
+    # report still reflects what actually ran.
+    cases = _normalize_cases(job_dir)
+    if not totals and cases:
+        counter = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
+        for case in cases:
+            counter[case.get("result", "error")] = counter.get(case.get("result", "error"), 0) + 1
+        totals = counter
+    result_str = (
+        (result.get("result") if isinstance(result, dict) else "")
+        or (compat.get("result") if isinstance(compat, dict) else "")
+        or (boot.get("result") if isinstance(boot, dict) else "")
+        or ""
+    )
 
     return {
         "name": name,
         "label": label,
         "result": result_str,
         "totals": totals,
-        "cases": _normalize_cases(job_dir),
+        "cases": cases,
         "environment": environment,
         "cuda": _read_json(job_dir / "cuda-diagnostics.json"),
         "server_cuda": _read_json(job_dir / "server" / "cuda-diagnostics.json"),
@@ -293,26 +311,67 @@ def render_run_markdown(run: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def discover_jobs(artifacts_root: Path) -> dict:
-    """Map each downloaded artifact folder to a known job by its mode in the name.
+_JOB_MARKERS = ("conformance-result.json", "compatibility-result.json", "extension-boot-result.json")
 
-    download-artifact lays each job's artifact under <root>/<artifact-name>/, where
-    the name is notch-contract-<mode>-<runid>. We match the mode substring.
+
+def _mode_for_job_dir(job_dir: Path) -> str:
+    """Identify a job dir's mode: prefer the recorded profile, fall back to the name.
+
+    compatibility-result.json carries a 'profile' like 'delivery_remote_client' /
+    'delivery_remote_server'; strip the _client/_server suffix to the job mode.
+    """
+    compat = _read_json(job_dir / "compatibility-result.json") or {}
+    profile = str(compat.get("profile", "")) if isinstance(compat, dict) else ""
+    for suffix in ("_client", "_server"):
+        if profile.endswith(suffix):
+            profile = profile[: -len(suffix)]
+    if profile in JOB_LABELS:
+        return profile
+    name = job_dir.name
+    for mode in JOB_LABELS:
+        if f"-{mode}-" in name or name.endswith(f"-{mode}") or name == mode:
+            return mode
+    return ""
+
+
+def discover_jobs(artifacts_root: Path) -> dict:
+    """Find each job's artifact folder under artifacts_root, robust to how
+    download-artifact lays things out (one subdir per artifact, possibly nested,
+    possibly renamed).
+
+    A job dir is any directory that directly contains a result marker or a
+    conformance/cases tree. We search a few levels deep and fold the remote
+    delivery's server/ subdir into its parent (it is not a separate job).
     """
     artifacts_root = Path(artifacts_root)
     jobs: dict = {}
     if not artifacts_root.is_dir():
         return jobs
-    for child in sorted(artifacts_root.iterdir()):
-        if not child.is_dir():
+
+    candidates: list[Path] = []
+    seen: set = set()
+    stack = [(artifacts_root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if current in seen or depth > 4:
             continue
-        matched = None
-        for mode in JOB_LABELS:
-            if f"-{mode}-" in child.name or child.name.endswith(f"-{mode}") or child.name == mode:
-                matched = mode
-                break
-        if matched and matched not in jobs:
-            jobs[matched] = (JOB_LABELS[matched], child)
+        seen.add(current)
+        if current.name == "server":  # the remote server's artifacts belong to its parent job
+            continue
+        has_marker = any((current / marker).is_file() for marker in _JOB_MARKERS) or (
+            current / "conformance" / "cases"
+        ).is_dir()
+        if has_marker and current != artifacts_root:
+            candidates.append(current)
+            continue  # do not descend into a job dir
+        for child in sorted(current.iterdir()):
+            if child.is_dir():
+                stack.append((child, depth + 1))
+
+    for job_dir in sorted(candidates, key=lambda p: p.name):
+        mode = _mode_for_job_dir(job_dir)
+        if mode and mode not in jobs:
+            jobs[mode] = (JOB_LABELS[mode], job_dir)
     return jobs
 
 
