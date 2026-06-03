@@ -354,6 +354,7 @@ def start_comfy_server(
     port: int,
     flags: str,
     log_path: Path,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.Popen[Any]:
     command = [
         str(python),
@@ -363,8 +364,11 @@ def start_comfy_server(
         *shlex.split(flags or ""),
     ]
     print(f"+ {' '.join(shlex.quote(part) for part in command)}")
+    env = {**os.environ, **(extra_env or {})}
     log = log_path.open("w", encoding="utf-8")
-    return subprocess.Popen(command, cwd=str(comfy_dir), stdout=log, stderr=subprocess.STDOUT, text=True)
+    return subprocess.Popen(
+        command, cwd=str(comfy_dir), env=env, stdout=log, stderr=subprocess.STDOUT, text=True
+    )
 
 
 def stop_process(process: subprocess.Popen[Any] | None) -> None:
@@ -477,6 +481,9 @@ def main() -> int:
         result["checks"]["cpp_client_compiles"] = True
 
         base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
+        # Run the server with NOTCH_CI so it captures WARNING+ diagnostics (with
+        # prompt_id) for GET /notch/diagnostics, and mirror them to a JSONL
+        # artifact. Harmless when nothing warns; the matrix collects them per case.
         server = start_comfy_server(
             python,
             comfy_dir,
@@ -484,6 +491,10 @@ def main() -> int:
             args.port,
             args.comfyui_flags,
             artifacts / "comfyui.log",
+            extra_env={
+                "NOTCH_CI": "1",
+                "NOTCH_CI_LOG": str(artifacts / "notch-ci.jsonl"),
+            },
         )
         poll_url(f"{base_url}/queue", args.timeout)
         result["checks"]["server_started"] = True
