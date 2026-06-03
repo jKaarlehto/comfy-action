@@ -67,7 +67,7 @@ authoritative symbol/section in ComfyUI-Notch (no line numbers — verify by nam
 | # | Axis | Components | Cardinality | Grounded in (ComfyUI-Notch, by symbol) |
 |---|------|-----------|-------------|------------------------------|
 | A0 | Setup / liveness | server wire-compat; WS handshake | 2 (fixed gates) | `core/client_compatibility.py`; `api/websocket.py` |
-| A1 | **Type-allowed (T)** | `image`, `non-image` | 2 | `OUTPUT_TYPES_BY_TRANSPORT` in `core/data_types.py` (cuda is image-only; everything else → disk,http) |
+| A1 | **Type-allowed (T)** | `image`, `non-image` | 2 | `OUTPUT_TYPES_BY_TRANSPORT` in `core/data_types.py`. The axis exists **only because cuda is image-only**: the output type is what gates whether cuda is an allowed transport at all. So there are exactly two classes — `image` (→ cuda,disk,http) and `non-image` (→ disk,http) — and any concrete non-image type (FILE_3D_GLB, AUDIO, MESH, …) is one fixture realizing the same `non-image` class. |
 | A2 | **Server-available (S)** | no-cuda: `{disk,http}`; cuda: `{cuda,disk,http}` | 2 meaningful classes | `supported_output_transports()` / `notch_feature_facts()` in `services/server_capabilities.py` |
 | A3 | **Client-reachable / locality (C)** | reachable **sets**: `{cuda,disk,http}`, `{disk,http}`, `{http}` | 3 sets (regimes: local / route-disk / http-only) | `features.md` §"The transports"; helper is set-based per §Status "Client-interface set helper" |
 | A4 | Request mode | `hard`, `soft` | 2 | `SelectOutputTransport` in `cpp/notch_comfy_client` (`m_preferredTransport` vs `m_preferenceOrder`) |
@@ -251,7 +251,8 @@ contract — read line by line, not pretty-printed).
 - **Layer 1 (19):** stub-verified as the contract matrix — all 19 cases run and
   pass against stub transports (`mock_client/tests/stub_check.cpp`). The live run
   ships discovery and readiness fixtures (`mock_client/fixtures/`) so it also
-  exercises all 19 — type-axis (image + mesh) and readiness decision (ready +
+  exercises all 19 — the type axis (its two classes, image and non-image,
+  realized by IMAGE and a FILE_3D_GLB fixture) and the readiness decision (ready +
   missing) included. Live coverage is partial unless those fixtures are supplied;
   a missing fixture is reported as a `skip` rather than reducing the contract
   count. Note the A5 cases verify the **client readiness decision**, not yet
