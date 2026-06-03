@@ -24,9 +24,10 @@ Notch node classes and server feature facts.
 
 `mode: protocol_negotiation` runs the boot setup and then the C++ mock client's
 discovery + transport-negotiation + readiness-decision cases (Layer 1, no GPU).
-`mode: execution_delivery` runs the boot setup and then the inject/execute/deliver
-cases plus file-availability enforcement (Layer 2, GPU). The three modes are
-composed as separate jobs in the consuming workflow.
+
+Real delivery testing is planned as a separate round-trip job. It will exercise
+`NotchSingleInput -> execute -> NotchOutputNode -> client fetch/import -> verify`
+instead of a thin queue-only check.
 
 ## Runner Model
 
@@ -80,7 +81,7 @@ checks on a floating branch.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds the Layer-1 discovery + transport-negotiation + readiness cases. `execution_delivery` adds the Layer-2 inject/execute/deliver cases + file-availability enforcement. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds the Layer-1 discovery + transport-negotiation + readiness cases. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
@@ -97,7 +98,7 @@ checks on a floating branch.
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
 | `pip_cache_dir` | `notch-contract-pip-cache` | Shared pip wheel cache under the runner workspace, mounted at `/cache/pip` and reused across both jobs and between runs. |
 | `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-initialization expectation. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-boot expectation. |
 
 ## Artifacts
 
@@ -114,7 +115,7 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `object-info-summary.json`
 - `object-info-debug.json` when node discovery fails
 - `extension-boot-result.json`
-- `conformance-result.json` when `mode: protocol_negotiation` or `execution_delivery`
+- `conformance-result.json` when `mode: protocol_negotiation`
 - `compatibility-result.json`
 
 `compatibility-result.json` is the file to use when promoting a

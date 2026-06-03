@@ -5,19 +5,18 @@ The C++ interface wraps each one in `{"prompt": ...}` before sending, so these
 files are the bare graph object. Every node needs a `_meta` field — ComfyUI's
 API schema validation (`/notch/parse`) requires it.
 
-## execute_workflow.json — delivery: model-free execution
+## execute_workflow.json — internal queue execution check
 `EmptyImage → PreviewImage`. A model-free workflow that executes to
 `execution_success`. It uses **stock output nodes** on purpose: a `NotchOutputNode`
 in the prompt forces `/notch/inject` to require `config.output`
 (`inject_service` gates on `count_notch_output_nodes`), which would reject this
-pure execution-lifecycle case. NotchOutputNode delivery (with output config) is
-the separate delivery-matrix work.
+pure queue-execution check. This is not the delivery suite.
 
-## execute_missing_file.json — delivery: file-availability enforcement
+## execute_missing_file.json — internal missing-file submit check
 `LoadImage(notch_ci_absent.png) → PreviewImage`. `LoadImage`'s `image` input is a
 COMBO of input-directory files; an absent filename fails ComfyUI validation, so
 the run is blocked at inject — and the block reason is genuinely the missing
-file (not an unrelated config error).
+file (not an unrelated config error). This is not output delivery.
 
 ## parse_workflow.json — type-axis discovery
 Two `NotchOutputNode`s, one wired from an `image` input, one from a `mesh`

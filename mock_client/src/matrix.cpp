@@ -147,7 +147,7 @@ const char* const kSpecSoft = "notch_conformance_spec.md §4 soft selection (A4 
 const char* const kSpecTypeAxis = "notch_conformance_spec.md §4 type-axis discovery (A1)";
 const char* const kSpecReadiness = "notch_conformance_spec.md §4 deployment-readiness decision (A5)";
 const char* const kSpecLiveness = "notch_conformance_spec.md §4 setup/liveness (A0)";
-const char* const kSpecExecution = "notch_conformance_spec.md §9a execution lifecycle (WS terminal event)";
+const char* const kSpecExecution = "notch_conformance_spec.md §9a queue execution (WS terminal event)";
 const char* const kSpecFileAvailability = "notch_conformance_spec.md §9 file-availability enforcement (A5 runtime)";
 
 } // namespace
@@ -323,7 +323,7 @@ std::string ReadFileSlice(const std::string& path, long start, long end)
     return buffer;
 }
 
-// Delivery-phase case: submit a workflow with execute=true, wait for the matching
+// Queue-execution/file-availability case: submit a workflow with execute=true, wait for the matching
 // terminal WS event by prompt_id, and assert the run outcome. For expectSuccess
 // the run must reach execution_success; otherwise (file-availability enforcement)
 // the run must be blocked — rejected at inject (not queued) or terminated with
@@ -345,7 +345,7 @@ void RunExecutionCase(
     CaseRecord rec;
     rec.caseId = caseId;
     rec.title = title;
-    rec.phase = expectSuccess ? "execution" : "delivery";
+    rec.phase = expectSuccess ? "queue-execution" : "file-availability";
     rec.description = description;
     rec.specRef = expectSuccess ? kSpecExecution : kSpecFileAvailability;
     rec.expectedJson = expectSuccess ? "{\"terminal\":\"execution_success\"}"
@@ -539,7 +539,7 @@ void WriteResultFile(const std::string& outputRoot, const std::string& phaseName
 }
 
 // Negotiation phase (Layer 1): discovery, readiness decision, the pure
-// transport-selection matrix, and the WS handshake smoke. No execution.
+// transport-selection matrix, and the WS handshake check. No execution.
 void RunNegotiationCases(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
@@ -685,14 +685,14 @@ void RunNegotiationCases(
         RunSelectionRow(recorder, row, /*soft=*/true);
     }
 
-    // 6. WebSocket handshake smoke: connect, send the feature-flags message,
+    // 6. WebSocket handshake check: connect, send the feature-flags message,
     //    drain any catch-up frames. Proves the transport is not dead code.
     {
         std::string wsError;
         if (!ws.Connect(options.wsTimeoutMs, wsError))
         {
             CaseRecord rec;
-            rec.caseId = "ws-handshake-smoke";
+            rec.caseId = "ws-handshake";
             rec.title = "WebSocket /ws handshake + catch-up frames";
             rec.phase = "liveness";
             rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames. Proves the WebSocket transport works end to end.";
@@ -713,7 +713,7 @@ void RunNegotiationCases(
             actual << "{\"connected\":true,\"sent\":" << CaseLogger::Bool(sent)
                    << ",\"received_frames\":" << frames.size() << "}";
             CaseRecord rec;
-            rec.caseId = "ws-handshake-smoke";
+            rec.caseId = "ws-handshake";
             rec.title = "WebSocket /ws handshake + catch-up frames";
             rec.phase = "liveness";
             rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames. Proves the WebSocket transport works end to end.";
@@ -730,10 +730,11 @@ void RunNegotiationCases(
     }
 }
 
-// Delivery phase (Layer 2): submit a workflow for execution and assert the
-// terminal WS event, and enforce file-availability (a workflow referencing a
-// missing file must be blocked, not run). Each case attaches per-case evidence.
-void RunDeliveryCases(
+// Internal support checks: submit a workflow for execution and assert the
+// terminal WS event; submit a missing-file workflow and assert it is blocked.
+// These do NOT test output delivery (no NotchOutputNode); the real delivery
+// phase is the planned round-trip suite in the spec.
+void RunQueueExecutionAndFileAvailabilityCases(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,
@@ -745,7 +746,7 @@ void RunDeliveryCases(
         CaseRecord rec;
         rec.caseId = "workflow-execution";
         rec.title = "Workflow execution skipped (no execute workflow fixture)";
-        rec.phase = "execution";
+        rec.phase = "queue-execution";
         rec.description = "No execute workflow fixture was supplied, so workflow execution was not exercised.";
         rec.specRef = kSpecExecution;
         rec.actualJson = "{\"reason\":\"no_execute_workflow\"}";
@@ -765,7 +766,7 @@ void RunDeliveryCases(
         CaseRecord rec;
         rec.caseId = "missing-input-file";
         rec.title = "File-availability enforcement skipped (no missing-file fixture)";
-        rec.phase = "delivery";
+        rec.phase = "file-availability";
         rec.description = "No missing-file fixture was supplied, so file-availability enforcement was not exercised.";
         rec.specRef = kSpecFileAvailability;
         rec.actualJson = "{\"reason\":\"no_missing_file_workflow\"}";
@@ -786,7 +787,6 @@ const char* PhaseName(Phase phase)
     switch (phase)
     {
     case Phase::Negotiation: return "negotiation";
-    case Phase::Delivery: return "delivery";
     case Phase::All: return "all";
     }
     return "all";
@@ -849,13 +849,10 @@ MatrixSummary RunConformance(
         logger.Event(json.str());
     }
 
-    if (options.phase != Phase::Delivery)
+    RunNegotiationCases(recorder, http, ws, options, serverCompat);
+    if (options.phase == Phase::All)
     {
-        RunNegotiationCases(recorder, http, ws, options, serverCompat);
-    }
-    if (options.phase != Phase::Negotiation)
-    {
-        RunDeliveryCases(recorder, http, ws, options, logger);
+        RunQueueExecutionAndFileAvailabilityCases(recorder, http, ws, options, logger);
     }
 
     logger.WriteIndex();

@@ -1,6 +1,6 @@
 // notch_mock_client: the CI consumer of cpp/notch_comfy_client. It wires the
 // IXWebSocket-backed transports into the transport-agnostic conformance
-// orchestration and runs the selected phase (negotiation, delivery, or all).
+// orchestration and runs the selected phase (negotiation, or all).
 
 #include <fstream>
 #include <iostream>
@@ -62,13 +62,14 @@ int main(int argc, char** argv)
         ArgValue(argc, argv, "--ws-url", DeriveWsBase(baseUrl) + "/ws?clientId=" + clientId);
 
     notch_mock::Phase phase = notch_mock::Phase::Negotiation;
-    if (phaseArg == "delivery")
-    {
-        phase = notch_mock::Phase::Delivery;
-    }
-    else if (phaseArg == "all")
+    if (phaseArg == "all")
     {
         phase = notch_mock::Phase::All;
+    }
+    else if (phaseArg != "negotiation")
+    {
+        std::cerr << "unsupported --phase '" << phaseArg << "'; expected negotiation or all" << std::endl;
+        return 2;
     }
 
     notch_mock::CaseLogger logger(outputRoot);

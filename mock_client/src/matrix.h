@@ -11,7 +11,7 @@
 namespace notch_mock
 {
 
-// Minimal WebSocket probe used by the matrix v1 handshake smoke case. It is a
+// Minimal WebSocket probe used by the Layer 1 handshake case. It is a
 // superset of the interface's IWebSocketTransport (which only sends) so the
 // orchestration can connect, send the feature-flags message, and drain received
 // frames for evidence without depending on the concrete transport library.
@@ -26,12 +26,12 @@ public:
 };
 
 // Which conformance phase(s) to run. Negotiation is Layer 1 (discovery +
-// transport selection + readiness decision, no execution, no GPU). Delivery is
-// Layer 2 (inject + execute + delivery + readiness enforcement). All runs both.
+// transport selection + readiness decision, no execution, no GPU). All also
+// runs two internal support checks: queue execution and file availability. The
+// real delivery phase is the planned round-trip suite in docs/notch_conformance_spec.md.
 enum class Phase
 {
     Negotiation,
-    Delivery,
     All,
 };
 
@@ -47,12 +47,12 @@ struct MatrixOptions
     // references a missing file. Empty fixtures skip the gate.
     std::string requiredFilesReadyJson;
     std::string requiredFilesMissingJson;
-    // Delivery-phase execution fixtures: a workflow that must execute
-    // successfully, and one referencing a missing file whose run must be blocked
-    // (the file-availability enforcement). Empty fixtures skip those cases.
+    // Internal support fixtures: a workflow that must execute
+    // successfully, and one referencing a missing file whose run must be blocked.
+    // Empty fixtures skip those cases.
     std::string executeWorkflowJson;
     std::string executeMissingFileJson;
-    int wsTimeoutMs = 5000;        // handshake budget for the smoke case
+    int wsTimeoutMs = 5000;        // handshake budget
     int executeTimeoutMs = 90000;  // budget to wait for a terminal execution event
 };
 
@@ -70,11 +70,10 @@ struct MatrixSummary
 
 // Run the conformance suite for the selected phase. Negotiation runs discovery
 // (live /features and optional /notch/parse), the readiness decision, the pure
-// transport-selection matrix, and a WebSocket handshake smoke. Delivery runs the
-// execution/delivery cases (inject, terminal WS event, file-availability
-// enforcement) with per-case diagnostics. Diagnostic-first: every runnable case
-// is executed; only a shared-setup failure short-circuits. Writes
-// conformance-result.json under options.outputRoot.
+// transport-selection matrix, and a WebSocket handshake check. All additionally
+// runs the internal queue-execution and file-availability checks. Diagnostic-first:
+// every runnable case is executed; only a shared-setup failure short-circuits.
+// Writes conformance-result.json under options.outputRoot.
 MatrixSummary RunConformance(
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,

@@ -3,7 +3,7 @@ description: "Verify the notch_comfy_client C++ interface conforms to the ComfyU
 
 inputs:
   mode:
-    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs the discovery + transport-negotiation + readiness-decision cases. execution_delivery runs the inject/execute/delivery cases and file-availability enforcement."
+    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs the discovery + transport-negotiation + readiness-decision cases."
     required: false
     default: "extension_boot"
   comfyui_repository:

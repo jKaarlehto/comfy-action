@@ -450,7 +450,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ComfyUI-Notch compatibility checks")
     parser.add_argument(
         "--mode",
-        choices=["extension_boot", "protocol_negotiation", "execution_delivery"],
+        choices=["extension_boot", "protocol_negotiation"],
         default="extension_boot",
     )
     parser.add_argument("--comfyui-repository", required=True)
@@ -472,7 +472,6 @@ def parse_args() -> argparse.Namespace:
 
 CONFORMANCE_MODES = {
     "protocol_negotiation": "negotiation",
-    "execution_delivery": "delivery",
 }
 
 
@@ -595,7 +594,18 @@ def main() -> int:
                 result["result"] = "fail"
                 result["setup_failure_code"] = exc.code
                 result["error"] = str(exc)
+                write_json(
+                    artifacts / "transport-interface-result.json",
+                    {
+                        "schema_version": 1,
+                        "result": "fail",
+                        "setup_failure_code": exc.code,
+                        "error": str(exc),
+                        "log": "mock-client-build.log",
+                    },
+                )
                 write_json(artifacts / result_filename, result)
+                emit_annotation("error", "Mock client build", f"{exc.code}: {exc}")
                 return 1
 
             fixtures = find_mock_client_dir() / "fixtures"
@@ -611,19 +621,13 @@ def main() -> int:
                 conformance_phase,
             ]
             # Negotiation fixtures exercise the type-axis and readiness-decision
-            # cases; delivery fixtures exercise execution and file-availability
-            # enforcement. Missing fixtures are recorded as skips, not failures.
+            # cases. Missing fixtures are recorded as skips, not failures.
             fixture_flags: dict[str, Path] = {}
             if conformance_phase == "negotiation":
                 fixture_flags = {
                     "--parse-workflow": fixtures / "parse_workflow.json",
                     "--required-files-ready": fixtures / "required_files_ready.json",
                     "--required-files-missing": fixtures / "required_files_missing.json",
-                }
-            elif conformance_phase == "delivery":
-                fixture_flags = {
-                    "--execute-workflow": fixtures / "execute_workflow.json",
-                    "--execute-missing-file": fixtures / "execute_missing_file.json",
                 }
             for flag, path in fixture_flags.items():
                 if path.is_file():

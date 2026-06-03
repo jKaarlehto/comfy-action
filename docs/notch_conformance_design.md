@@ -4,7 +4,8 @@ This document describes the first Notch-specific version of `comfy-action`.
 It adapts the action from "run a sample ComfyUI workflow" into a slim contract
 check for `ComfyUI-Notch`: build a Docker runner image, start a pinned ComfyUI
 version with the custom node installed, compile the C++ client interface, and
-later exercise the local transport negotiation matrix.
+exercise protocol negotiation with the C++ mock client. Real delivery testing is
+planned as a later local/remote-topology round-trip job.
 
 ## Ownership Model
 
@@ -47,7 +48,7 @@ The host runner can be Windows or Linux as long as it has Docker and PowerShell.
 During development the expected host is a self-hosted Windows runner using
 Docker Desktop or a comparable Docker engine. The actual ComfyUI server, Python
 environment, and C++ compile check run inside the Linux CUDA image, so the
-extension-initialization contract is portable across Docker hosts.
+extension-boot contract is portable across Docker hosts.
 
 The container mounts:
 
@@ -73,9 +74,9 @@ CI product:
 - The self-hosted runner is trusted infrastructure. Docker gives environment
   repeatability and cleanup, but it is not a security boundary for untrusted
   workflows.
-- `contract_matrix` starts with discovery and negotiation only. Execution,
-  delivery, and CUDA IPC validation stay in later phases until the mock client
-  can prove those paths with real outputs.
+- `protocol_negotiation` starts with discovery and negotiation only. Real
+  delivery and CUDA IPC validation stay in the planned round-trip jobs, not in a
+  queue-only interim phase.
 
 ## Goals
 
@@ -85,7 +86,7 @@ CI product:
 - Verify that `cpp/notch_comfy_client` compiles.
 - Record the Python, CUDA, Docker-host, ComfyUI, and extension facts needed to
   reproduce a successful or failed run.
-- In `contract_matrix` mode, verify negotiation-axis positives and negatives
+- In `protocol_negotiation` mode, verify negotiation-axis positives and negatives
   with a C++ mock client linked against the vendored client interface.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
@@ -96,9 +97,9 @@ CI product:
 - Do not test Notch output targets. Connected, Project Resource, New Output
   Node, Save to Disk, and other target choices are Notch-side output handling
   policy, not part of transport negotiation.
-- Do not emulate a remote Comfy server in the first `contract_matrix` mode. Remote
-  behavior can be added later with a second container or machine.
-- Do not download large model sets for the extension-initialization check.
+- Do not emulate a remote Comfy server in `protocol_negotiation` mode. Remote
+  behavior belongs to the planned Docker Compose delivery job.
+- Do not download large model sets for the extension-boot check.
 - Do not archive an entire Python environment unless a repro needs it. Prefer
   manifest artifacts.
 
@@ -108,7 +109,7 @@ Keep configuration small:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_initialization` | `extension_initialization` runs the boot/node/feature/client compile check. `contract_matrix` runs the same setup, then runs the C++ mock client's discovery and negotiation matrix. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` runs the same setup, then runs the C++ mock client's discovery and negotiation matrix. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository to clone inside the container. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
@@ -125,7 +126,7 @@ Keep configuration small:
 | `artifact_dir` | `notch-contract-artifacts` | Simple path under the caller workspace. Cleared at the start of each run. |
 | `pip_cache_dir` | `notch-contract-pip-cache` | Simple path under the self-hosted runner workspace mounted as `/cache/pip`. Shared by both jobs on the same runner so the matrix job can reuse downloaded wheels. |
 | `upload_artifacts` | `true` | Upload `artifact_dir` with `actions/upload-artifact`. |
-| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-initialization expectation. |
+| `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-boot expectation. |
 
 Do not add arbitrary per-test selectors until the two modes prove too coarse.
 The conformance suite should own its case table in source control so a run is
@@ -166,7 +167,7 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
    NotchOutputNode
    ```
 
-14. Write the extension-initialization result and compatibility artifacts.
+14. Write the extension-boot result and compatibility artifacts.
 15. Stop ComfyUI; Docker removes the container.
 
 This proves that the pinned ComfyUI version can import the extension, expose the
@@ -258,11 +259,12 @@ per-case `fail`: like a server that cannot start or a client that cannot
 compile, it aborts the matrix before any case runs (see Contract Matrix
 Execution Model).
 
-Matrix v1 uses the real HTTP transport and the interface parsers for `/features`
-and `/notch/parse`. It also performs a WebSocket handshake smoke case so the
-transport is not dead code. It does not submit `/notch/inject` yet. Matrix v2
-will reuse the same transports for execution, output-ready events, artifact
-fetch, and CUDA share-status validation.
+The runnable `protocol_negotiation` mode uses the real HTTP transport and the
+interface parsers for `/features` and `/notch/parse`. It also performs a
+WebSocket handshake case so the transport is not dead code. It does not submit
+`/notch/inject` yet. The planned delivery jobs will reuse the same transports
+for execution, output-ready events, artifact fetch, byte verification, and CUDA
+share-status validation.
 
 The suite tests three negotiation axes:
 
@@ -280,8 +282,8 @@ not yet built, so the gate is asserted ahead of the extension and a live failure
 flags the gap to fix.
 
 The canonical case set — every axis, its components, the boundary counting
-criterion, the exact counts (Layer 1 = 18, full v2 = 31), the growth rules, and
-the spec→`mock_client` generation mapping — lives in
+criterion, the exact counts (implemented Layer 1 = 19, planned full conformance
+= 32), the growth rules, and the spec→`mock_client` generation mapping — lives in
 `docs/notch_conformance_spec.md`. Treat that document as the source of truth
 for the matrix; the tables below are worked examples derived from it.
 
@@ -359,10 +361,9 @@ transport choices. The soft-order rows are helper behavior only; they must not
 be read as permission for the server to downgrade a submitted
 `config.output.transport`.
 
-Remote server cases are out of scope for the first `contract_matrix` mode. A future
-phase can emulate remote topology by starting a second container or machine.
-That should be a separate remote-topology mode because Docker networking
-and filesystem mounts add their own failure modes.
+Remote server cases are out of scope for `protocol_negotiation`. They belong to
+the planned `delivery-remote` Docker Compose job because networking and
+filesystem reachability are delivery topology, not selection logic.
 
 ### Contract Matrix Execution Model
 
@@ -373,17 +374,21 @@ client cannot compile, the transport adapters are incompatible with the current
 interface, `/features` is unreachable, or `/object_info` is missing required
 node classes).
 
-Use two implementation phases:
+Use two implementation stages:
 
-1. **Matrix v1: discovery and selection.** Build and run the C++ mock client.
+1. **Layer 1: discovery and selection.** Build and run the C++ mock client.
    Use live `/features` and `/notch/parse` responses plus the C++ client's
    transport-selection helper. Do not queue workflow execution yet. This
    verifies that the extension's advertised workflow/type axis, server
    deployment facts, and client reachability negotiation agree.
-2. **Matrix v2: execution and delivery.** Add `/notch/inject`, WebSocket
-   lifecycle capture, disk output validation, HTTP artifact fetch validation,
-   CUDA share-status validation, and optional CUDA IPC import when the runner
-   environment supports it.
+2. **Delivery round-trip.** Add `/notch/inject`, WebSocket lifecycle capture,
+   `NotchSingleInput` fixture values, `NotchOutputNode` delivery, disk/HTTP/CUDA
+   artifact retrieval, SHA-256 plus decoded shape/type checks, and topology
+   variants. The planned jobs are `delivery-local` (single container; disk,
+   HTTP, CUDA) and `delivery-remote` (Docker Compose; HTTP, named-route disk,
+   unshared-filesystem negatives). Do not keep queue-only execution checks as a
+   prerequisite job; execution and file-availability assertions are folded into
+   delivery.
 
 For both phases, each case should produce a structured result object:
 
@@ -519,7 +524,7 @@ python-install.log
 environment.log
 cpp-compile.log
 mock-client-build.log
-extension-initialization-result.json
+extension-boot-result.json
 conformance-result.json
 compatibility-result.json
 ```
@@ -541,14 +546,14 @@ compatibility-result.json
 - Server URL and port.
 - Selected mode.
 - Extension-initialization assertions and result.
-- Conformance case summary when `mode=contract_matrix`.
+- Conformance case summary when `mode=protocol_negotiation`.
 
 Every run should also write `compatibility-result.json`:
 
 ```json
 {
   "schema_version": 1,
-  "profile": "extension_initialization",
+  "profile": "extension_boot",
   "result": "pass",
   "comfyui_ref": "v0.x.y",
   "comfyui_commit": "<resolved commit>",
@@ -567,7 +572,7 @@ Every run should also write `compatibility-result.json`:
 }
 ```
 
-For contract matrix mode, use `profile: "contract_matrix"` and include case totals.
+For protocol-negotiation mode, use `profile: "protocol_negotiation"` and include case totals.
 
 ## Cleanup And Caching
 
@@ -601,7 +606,7 @@ Safe to cache or reuse:
   which vary by `comfyui_ref` and so are not baked. `pip-freeze.txt` and
   `python-env.json` record the exact installed environment.
 - Optional model cache for future non-initialization tests, but not the phase-1
-  extension-initialization check.
+  extension-boot check.
 
 Do not cache:
 
@@ -632,7 +637,7 @@ Suggested content:
 ```json
 {
   "schema_version": 1,
-  "profile": "extension_initialization",
+  "profile": "extension_boot",
   "comfyui_ref": "v0.x.y",
   "comfyui_commit": "<resolved commit>",
   "comfyui_notch_commit": "<commit>",
@@ -654,8 +659,8 @@ Promotion rules:
 - Manual trusted runs may promote when a consuming workflow explicitly performs
   that write.
 - Promotion should require a passing result for the selected mode.
-- Future contract-matrix results should have their own profile value rather than
-  overwriting an extension-initialization record with stronger claims.
+- Future delivery results should have their own profile value rather than
+  overwriting an extension-boot record with stronger claims.
 
 ## Future Phases
 

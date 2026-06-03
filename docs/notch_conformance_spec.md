@@ -9,8 +9,9 @@ the counting criterion, and the exact case count, so that:
 2. the tests are **generated from the spec** — each row of a data table in
    `mock_client/` emits exactly one case; the totals below are the assertion.
 
-We reason against **v2** (live execution + delivery) as the end target. v1 is the
-selection/discovery slice that needs no execution.
+The runnable action currently covers Layer 1: selection/discovery/readiness with
+no workflow execution. The final target is a delivery round-trip suite, not a
+thin standalone execution phase.
 
 ## Scope
 
@@ -84,7 +85,7 @@ deferred to an optional separate policy sub-suite (see §Scope).
   reachable *set* the Notch service computed. The 3 documented regimes collapse
   to **3 distinct sets**, all already used. So adding locality granularity (e.g.
   named-route disk) adds **0** selection cases as long as it reuses an existing
-  reachable set. Locality's real cost is in v2 live delivery.
+  reachable set. Locality's real cost is in delivery round-trip coverage.
 - **A5 is a gate, not a transport.** Required-files is *user-actionable, not
   negotiable* (`notch_comfy_client.md` §File Manifest): a missing model file can't
   be auto-resolved. It is orthogonal to transport selection (not a term in
@@ -115,7 +116,7 @@ deferred to an optional separate policy sub-suite (see §Scope).
 predicate.** The strict MC/DC claim applies only to the hard-selection rejects,
 where each independent condition of `usable = T ∩ S ∩ C` is isolated so one axis
 alone rules a transport out. The rest — setup/liveness, type-axis discovery,
-soft fallback, the A5 gate, and (v2) delivery — is equivalence-class /
+soft fallback, the A5 gate, and final delivery — is equivalence-class /
 decision-table boundary coverage, not strict MC/DC. Applied as follows:
 
 - every transport is **selected** at least once, per type class where it varies;
@@ -124,7 +125,7 @@ decision-table boundary coverage, not strict MC/DC. Applied as follows:
 - the **empty-intersection** reject once;
 - each distinct **soft** behavior once;
 - each **gate** component (ready / not-ready) once;
-- (v2) each **reachable live delivery** `(type × transport × regime)` once, plus
+- final delivery tests each **reachable live delivery** `(type × transport × regime)` once, plus
   representative server-side delivery rejects.
 
 A full Cartesian product would be exact too, but most rows would be redundant;
@@ -137,7 +138,7 @@ use in their worked examples.
 
 | Component | Axes | Count | Derivation |
 |---|---|---|---|
-| Setup / liveness | A0 | 2 | wire-compat + WS smoke |
+| Setup / liveness | A0 | 2 | wire-compat + WS handshake |
 | Type-axis discovery (live `/notch/parse`) | A1 | 2 | `|T|` = {image, non-image} |
 | Deployment-readiness decision (live `/notch/get-required-files`; no execution) | A5 | 2 | all required files exist vs ≥1 missing |
 | Hard selection | A1·A2·A3·A4 | 10 | 5 positives + 5 rejects (below) |
@@ -148,7 +149,7 @@ rejects `cuda-by-T(1) + cuda-by-S(1) + cuda-by-C(1) + disk-by-C(1) + empty(1) = 
 The cuda reject is isolated to one axis per row, so **S**-unavailable (no GPU)
 and **C**-unreachable (remote) are distinct cases.
 
-### Layer 2 — Live Delivery (execution; remote needs topology) = 13
+### Layer 2 — Delivery Round-Trip (planned) = 13
 
 | Component | Count | Derivation |
 |---|---|---|
@@ -156,18 +157,48 @@ and **C**-unreachable (remote) are distinct cases.
 | Server delivery hard-error negatives | 2 | cuda-without-GPU + type/transport mismatch |
 
 Layer 2 proves the **transports actually deliver** and that the gate/negatives
-hold at runtime. It does **not** include output feature/generation policies
-(metadata embedding, manifest embedding, previews, etc.) — those are out of
-scope per §Scope and would be a separate sub-suite if ever added.
+hold at runtime. It is a real round-trip:
 
-The **6 remote** deliveries (route-disk + http-only) require real two-host
-topology → **docker-compose** (separate remote-topology mode).
+```text
+NotchSingleInput fixture value
+  -> /notch/inject execute=true
+  -> workflow executes
+  -> NotchOutputNode delivers through the selected transport
+  -> mock client receives/fetches/imports the output
+  -> SHA-256 plus decoded shape/type checks match expectations
+```
+
+Do not create or preserve a permanent queue-only "execution" layer. A workflow
+that only proves `/notch/inject?execute=true` can reach a terminal WebSocket
+event has no `NotchSingleInput`, no `NotchOutputNode`, no selected transport,
+and no byte verification. It is useful while developing the harness and should
+be deleted once the delivery round-trip exists.
+
+Topology is part of delivery, not selection:
+
+- **delivery-local** runs in the existing single container. The mock client and
+  ComfyUI share one filesystem and one CUDA process namespace. Test disk, HTTP,
+  and CUDA here. CUDA IPC belongs only here; do not attempt cross-container CUDA
+  IPC as a contract test.
+- **delivery-remote** runs in Docker Compose with separate client/server
+  containers. No shared filesystem by default. Test HTTP, named-route disk when
+  explicitly configured, and unshared-filesystem negatives. CUDA is absent from
+  client reachability in this topology.
+
+Both delivery jobs depend on `extension-boot` and `protocol-negotiation`. They
+must not depend on any queue-only interim check. Successful execution and
+file-availability enforcement are preconditions/negative cases inside delivery,
+not separate prerequisite jobs.
+
+Layer 2 does **not** include output feature/generation policies (metadata
+embedding, manifest embedding, previews, etc.) — those are out of scope per
+§Scope and would be a separate sub-suite if ever added.
 
 ### Totals (exact)
 
 ```
-v1  (Layer 1)            = 19
-full v2 (Layer 1 + 2)    = 19 + 13 = 32
+implemented Layer 1        = 19
+planned full conformance   = 19 + 13 = 32
 ```
 
 ## 5. Growth rules — how the count changes when behavior grows
@@ -179,7 +210,7 @@ Edit §2, then the tables in `mock_client/` follow:
 - **New transport** → new positives (per type class allowing it) + one reject per
   axis that can exclude it.
 - **New reachability regime (locality)** → **+0** to selection if it reuses an
-  existing reachable set; only adds v2 live-delivery cases (and topology).
+  existing reachable set; only adds delivery round-trip cases (and topology).
 - **New capability gate** (like A5) → +2 (pass/fail of the gate), additive.
 - **New output feature/generation policy** (metadata, manifest embedding,
   previews, …) → **out of scope** for this matrix; if ever needed it becomes a
@@ -190,16 +221,16 @@ Edit §2, then the tables in `mock_client/` follow:
 | Case group | Tests | Grounded in (ComfyUI-Notch) | Grounding strength |
 |---|---|---|---|
 | wire-compat | client/server protocol versions agree | `core/client_compatibility.py`; C++ `CheckServerCompatibility` | live |
-| WS smoke | `/ws` accepts feature_flags, sends catch-up | `api/websocket.py`; `register_server_feature_flags` in `comfy_adapter/runtime.py` | live (shallow) |
+| WS handshake | `/ws` accepts feature_flags, sends catch-up | `api/websocket.py`; `register_server_feature_flags` in `comfy_adapter/runtime.py` | live (shallow) |
 | type-axis | `/notch/parse` `outputs[].transports` per type | `get_workflow_outputs` in `services/notch_workflow_graph.py`; `OUTPUT_TYPES_BY_TRANSPORT` | live |
 | readiness decision (L1) | required files `exists`; client-side "any missing ⇒ not-ready" decision | `api/file_manifest_handler.py`; `file_manifest_service.py`; C++ `ParseRequiredFilesResponse` | live (client decision) |
-| readiness enforcement (L2) | `not-ready ⇒ server rejects the run` | (not yet built in ComfyUI-Notch) | **contract-ahead-of-server** (assert in v2, enforce later) |
+| readiness enforcement (delivery) | `not-ready ⇒ server rejects the run` | (not yet built in ComfyUI-Notch) | planned delivery negative |
 | hard/soft selection | `usable = T∩S∩C`, hard-error, no downgrade | C++ `SelectOutputTransport`; expected sets from `OUTPUT_TYPES_BY_TRANSPORT`, `supported_output_transports()`, `build_notch_output_config` in `services/output_config_service.py` | pure helper (server-grounded expectations) |
-| (v2) delivery | actual disk/http/cuda delivery + events | `services/output_delivery.py`; `services/cuda_shares.py`; `notch-output-ready` | deferred |
+| delivery round-trip | actual disk/http/cuda delivery + events + byte verification | `services/output_delivery.py`; `services/cuda_shares.py`; `notch-output-ready` | planned |
 
 "pure helper" means the case exercises the **C++ interface** logic; its *expected
 values* come from extension source, but it does not yet prove the live server
-agrees at delivery time — that is the Layer-2 job.
+agrees at delivery time — that is the planned delivery round-trip job.
 
 ## 7. Generation — spec to tests
 
@@ -246,39 +277,40 @@ pretty-printed; the run-wide `.jsonl` streaming logs (`mock-client.jsonl`,
 `http.jsonl`, `websocket.jsonl`) stay one record per line (the JSON Lines
 contract — read line by line, not pretty-printed).
 
-## 8. Status — phases and jobs
+## 8. Status — what is real today vs. the ideal
 
-The suite runs as three composable jobs (each `--phase` / `mode`): `extension-boot`
-→ `protocol-negotiation` (Layer 1) → `execution-delivery` (Layer 2). The stub
-self-test runs all phases at once (`--phase all`) and asserts the total.
+Be honest about what the action proves. The runnable public jobs are:
 
-- **Negotiation phase (Layer 1, 19):** implemented and stub-verified — all 19
-  cases run and pass against stub transports (`mock_client/tests/stub_check.cpp`).
-  The live run ships discovery and readiness fixtures (`mock_client/fixtures/`) so
-  it also exercises all 19 — the type axis (its two classes, image and non-image,
-  realized by IMAGE and a FILE_3D_GLB fixture) and the readiness decision (ready +
-  missing). A missing fixture is reported as a `skip`, not a reduced count. The A5
-  cases here verify the **client readiness decision**; runtime enforcement is in
-  the delivery phase.
-- **Delivery phase (Layer 2):** two cases implemented and stub-verified — an
-  `execution-success` case (model-free workflow → terminal `execution_success` via
-  WS, §9a) and a `file-availability-blocked` case (a workflow referencing a missing
-  file must be blocked at inject or terminated with `execution_error`, never
-  succeed). Each delivery case attaches per-case evidence: `websocket.jsonl`, a
-  `server.log` byte-offset slice, and `notch-diagnostics.json` (the WARNING+
-  records captured under that `prompt_id`). **Remaining (planned):** the full
-  disk/http/cuda delivery + hash-verification matrix, the server-side type/transport
-  negatives, and the remote topology (docker-compose) for the 6 remote deliveries.
-  Output feature/generation policies remain out of scope.
+```text
+extension-boot -> protocol-negotiation
+```
 
-Total live count today: **19 negotiation + 2 delivery = 21** (stub asserts 21).
+`extension-boot` proves the extension loads and the C++ client interface
+compiles. `protocol-negotiation` proves Layer 1: discovery, readiness decision,
+transport selection, and the WebSocket handshake. It does not execute a workflow.
 
-## 9. v2 Diagnostics — WS assertions and per-case Notch logs (planned)
+There is currently **no test of the actual Notch round-trip**: injecting an input
+value, executing, delivering an output, and verifying the delivered bytes. Input
+injection, output delivery, and byte verification are all untested.
 
-v2 cases execute workflows, so each case gains two diagnostic channels. Both are
-**structured, never regex over the server log** — the ComfyUI log format is not a
-stable contract, so the matrix must not assert on parsed log text. Raw log is
-kept only as a per-case byte-offset slice (`server.log`) for human context.
+Do not add a permanent standalone execution job. A workflow that only proves
+`/notch/inject?execute=true` can reach a terminal WebSocket event has no
+`NotchSingleInput`, no `NotchOutputNode`, no selected transport, and no byte
+verification. It may be useful while developing the harness, but the final
+delivery implementation should delete those queue-only fixtures or fold their
+assertions into delivery preconditions. The compose delivery jobs must not depend
+on them.
+
+Total implemented live count today: **19 negotiation**. These prove protocol
+negotiation; they do not prove delivery.
+
+## 9. Delivery Diagnostics — WS assertions and per-case Notch logs (planned)
+
+Delivery cases execute workflows, so each case gains two diagnostic channels.
+Both are **structured, never regex over the server log** — the ComfyUI log format
+is not a stable contract, so the matrix must not assert on parsed log text. Raw
+log is kept only as a per-case byte-offset slice (`server.log`) for human
+context.
 
 ### 9a. WebSocket lifecycle assertions (client-side, no new server work)
 

@@ -94,7 +94,7 @@ public:
     std::vector<std::string> DrainReceived() override
     {
         // The execution-success case waits for a terminal event matching the
-        // injected prompt_id; emit it (also serves as a catch-up frame for smoke).
+        // injected prompt_id; emit it (also serves as a catch-up frame for the handshake check).
         return std::vector<std::string>{
             "{\"type\":\"execution_success\",\"data\":{\"prompt_id\":\"psuccess\"}}"};
     }
@@ -110,15 +110,13 @@ int main()
     notch_mock::CaseLogger logger("stub-out");
 
     notch_mock::MatrixOptions options;
-    options.phase = notch_mock::Phase::All;
+    options.phase = notch_mock::Phase::Negotiation;
     options.baseUrl = "http://127.0.0.1:8188";
     options.outputRoot = "stub-out";
     options.clientId = "stub-client";
     options.parseWorkflowJson = "{\"image_output\":1}";
     options.requiredFilesReadyJson = "{\"all_present\":1}";
     options.requiredFilesMissingJson = "{\"missing_file\":1}";
-    options.executeWorkflowJson = "{\"empty_image\":1}";
-    options.executeMissingFileJson = "{\"missing_ckpt\":1}";
 
     notch_mock::MatrixSummary summary = notch_mock::RunConformance(http, ws, options, logger);
 
@@ -126,8 +124,7 @@ int main()
                 summary.passed, summary.failed, summary.skipped, summary.errored);
 
     // negotiation: 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 3 soft + 1 ws = 19.
-    // delivery: 1 execution-success + 1 file-availability-blocked = 2.  Total = 21.
-    if (!summary.Ok() || summary.passed != 21 || summary.failed != 0)
+    if (!summary.Ok() || summary.passed != 19 || summary.failed != 0)
     {
         std::printf("stub conformance self-test FAILED\n");
         return 1;

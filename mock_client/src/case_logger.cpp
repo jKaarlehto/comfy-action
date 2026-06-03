@@ -120,7 +120,7 @@ void CaseLogger::WriteCase(const CaseRecord& record)
 void CaseLogger::WriteIndex()
 {
     static const char* kPhases[] = {"liveness", "discovery", "readiness", "transport-selection",
-                                     "execution", "delivery"};
+                                     "queue-execution", "file-availability", "delivery"};
 
     std::ostringstream md;
     md << "# Conformance — case index\n\n"
