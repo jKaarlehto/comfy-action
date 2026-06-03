@@ -50,8 +50,10 @@ add_executable(notch_mock_client
 target_link_libraries(notch_mock_client PRIVATE notch_mock_matrix ixwebsocket)
 if(CUDAToolkit_FOUND)
     target_sources(notch_mock_client PRIVATE src/transports/local_cuda_share_reader.cpp)
-    # Runtime API (cudart) to match the Notch client's cudaIpc* path.
-    target_link_libraries(notch_mock_client PRIVATE CUDA::cudart)
+    # Runtime API (cudart) is the production import path the Notch client uses;
+    # the driver library (cuda_driver) provides cuIpcOpenMemHandle for the
+    # reader's fallback open when the runtime open returns InvalidResourceHandle.
+    target_link_libraries(notch_mock_client PRIVATE CUDA::cudart CUDA::cuda_driver)
     target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_RUNTIME=1)
 endif()
 
