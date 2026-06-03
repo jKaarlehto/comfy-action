@@ -29,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout ComfyUI-Notch (interface source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.event.inputs.extension_repository || 'jKaarlehto/ComfyUI-Notch' }}
           ref: ${{ github.event.inputs.extension_ref || '' }}

@@ -93,8 +93,12 @@ def emit_annotation(level: str, title: str, message: str) -> None:
     print(f"::{level} title={title_esc}::{esc(message)}", flush=True)
 
 
-def annotate_conformance(artifacts: Path, phase: str) -> None:
-    """Surface each conformance case (and the totals) as run-overview annotations."""
+def annotate_conformance(artifacts: Path, job_label: str) -> None:
+    """Surface each conformance case (and the totals) as run-overview annotations.
+
+    job_label titles the totals annotation and should match the workflow job name
+    (e.g. "Protocol negotiation", "Local delivery").
+    """
     cases_dir = artifacts / "conformance" / "cases"
     if cases_dir.is_dir():
         for case_json in sorted(cases_dir.glob("*/case.json")):
@@ -122,7 +126,7 @@ def annotate_conformance(artifacts: Path, phase: str) -> None:
         f"pass={totals.get('pass', 0)} fail={totals.get('fail', 0)} "
         f"skip={totals.get('skip', 0)} error={totals.get('error', 0)}"
     )
-    emit_annotation("notice", f"Conformance {phase}", summary)
+    emit_annotation("notice", job_label, summary)
 
 
 def read_url_json(url: str, timeout_seconds: int = 10) -> Any:
@@ -482,6 +486,14 @@ CONFORMANCE_MODES = {
     "delivery_remote_client": "delivery-remote",
 }
 
+# Human job labels (match the workflow job names) used for annotation titles.
+JOB_LABELS = {
+    "extension_boot": "Extension boot",
+    "protocol_negotiation": "Protocol negotiation",
+    "delivery_local": "Local delivery",
+    "delivery_remote_client": "Remote delivery",
+}
+
 
 def main() -> int:
     args = parse_args()
@@ -597,7 +609,7 @@ def main() -> int:
                 "environment_snapshot_sha256": file_sha256(artifacts / "environment.json"),
             }
             write_json(artifacts / "compatibility-result.json", compatibility)
-            annotate_conformance(artifacts, "delivery-remote")
+            annotate_conformance(artifacts, JOB_LABELS.get(mode, "Remote delivery"))
             return 0 if passed else 1
 
         clone_repo(runner, args.comfyui_repository, args.comfyui_ref, comfy_dir, "git.log")
@@ -768,7 +780,7 @@ def main() -> int:
                 "environment_snapshot_sha256": file_sha256(artifacts / "environment.json"),
             }
             write_json(artifacts / "compatibility-result.json", compatibility)
-            annotate_conformance(artifacts, conformance_phase)
+            annotate_conformance(artifacts, JOB_LABELS.get(mode, conformance_phase))
             return 0 if passed else 1
 
         result["result"] = "pass"

@@ -79,6 +79,35 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: "Explain conformance mode"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $mode = "${{ inputs.mode }}"
+        switch ($mode) {
+          "extension_boot" {
+            $title = "Extension boot"
+            $message = "Purpose: prove the selected ComfyUI version can load ComfyUI-Notch and expose its cross-platform nodes. How: clone ComfyUI at comfyui_ref, install the caller checkout as a custom node, compile cpp/notch_comfy_client, start ComfyUI, then check /features and /object_info. Concept: boot means import/startup compatibility, not workflow execution."
+          }
+          "protocol_negotiation" {
+            $title = "Protocol negotiation"
+            $message = "Purpose: prove the C++ client interface and extension agree on the contract before execution. Discovery reads server/workflow facts such as feature flags, input/output types, and available transports. Transport negotiation chooses or rejects a transport by intersecting type-allowed, server-available, and client-reachable sets. Readiness checks deployment prerequisites such as required files before queueing. How: the C++ mock client linked to cpp/notch_comfy_client runs the live discovery/readiness checks and transport-selection matrix."
+          }
+          "delivery_local" {
+            $title = "Local delivery"
+            $message = "Purpose: prove selected local transports actually deliver bytes. How: run ComfyUI and the mock client in one container, inject deterministic inputs, execute NotchSingleInput to NotchOutputNode workflows, wait for prompt-matched WebSocket success/output signals, then verify disk, HTTP, and CUDA outputs with hashes and shape/type checks. Concept: local means shared filesystem reachability and possible host-local CUDA IPC."
+          }
+          "delivery_remote" {
+            $title = "Remote delivery"
+            $message = "Purpose: prove network-only delivery works and unreachable local-only transports reject. How: run a ComfyUI server container and a separate mock-client container on a private Docker network with no shared output filesystem; HTTP must round-trip with matching hashes, while disk and CUDA must reject before inject. Concept: remote means HTTP/WebSocket reachability without shared filesystem or CUDA IPC."
+          }
+          default {
+            $title = "Notch conformance"
+            $message = "Purpose: run the requested ComfyUI-Notch conformance mode. How: build the Docker runner image, mount the caller checkout, and execute the selected mode with artifacts and annotations."
+          }
+        }
+        Write-Host "::notice title=$title::$message"
+
     - name: "[Docker] Prepare artifact directory"
       shell: pwsh
       run: |
@@ -307,7 +336,7 @@ runs:
 
     - name: "[Docker] Upload contract artifacts"
       if: ${{ inputs.upload_artifacts == 'true' && always() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: notch-contract-${{ inputs.mode }}-${{ github.run_id }}
         path: ${{ github.workspace }}/${{ inputs.artifact_dir }}
