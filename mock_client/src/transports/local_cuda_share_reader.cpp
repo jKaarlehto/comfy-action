@@ -2,9 +2,15 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
 
-#include <cuda.h>
+#include <cuda_runtime.h>
+
+// Use the CUDA *runtime* API (cudaIpc*) to match the real Notch client, which
+// imports output shares with cudaIpcOpenMemHandle / cudaIpcMemHandle_t (see
+// Notch's NGXGetIpcMemHandle using cudaIpcGetMemHandle). The earlier driver-API
+// (cuIpcOpenMemHandle) reader tested a different code path than production; the
+// server exports a 64-byte handle that the runtime API opens, exactly as Notch
+// does.
 
 namespace notch_mock
 {
@@ -12,27 +18,16 @@ namespace notch_mock
 namespace
 {
 
-bool CheckCuda(CUresult result, const std::string& operation, std::string& error)
+bool CheckCuda(cudaError_t result, const std::string& operation, std::string& error)
 {
-    if (result == CUDA_SUCCESS)
+    if (result == cudaSuccess)
     {
         return true;
     }
-    const char* name = nullptr;
-    const char* text = nullptr;
-    cuGetErrorName(result, &name);
-    cuGetErrorString(result, &text);
-    error = operation + " failed";
-    if (name != nullptr)
-    {
-        error += " ";
-        error += name;
-    }
-    if (text != nullptr)
-    {
-        error += ": ";
-        error += text;
-    }
+    error = operation + " failed ";
+    error += cudaGetErrorName(result);
+    error += ": ";
+    error += cudaGetErrorString(result);
     return false;
 }
 
@@ -61,12 +56,8 @@ bool HexToBytes(const std::string& hex, std::vector<uint8_t>& bytes)
 
 bool LocalCudaShareReader::CudaAvailable(std::string& error)
 {
-    if (!CheckCuda(cuInit(0), "cuInit", error))
-    {
-        return false;
-    }
     int deviceCount = 0;
-    if (!CheckCuda(cuDeviceGetCount(&deviceCount), "cuDeviceGetCount", error))
+    if (!CheckCuda(cudaGetDeviceCount(&deviceCount), "cudaGetDeviceCount", error))
     {
         return false;
     }
@@ -96,78 +87,45 @@ bool LocalCudaShareReader::ReadShare(
     }
 
     std::vector<uint8_t> handleBytes;
-    if (!HexToBytes(share.m_ipcHandleHex, handleBytes) || handleBytes.size() != sizeof(CUipcMemHandle))
+    if (!HexToBytes(share.m_ipcHandleHex, handleBytes) || handleBytes.size() != sizeof(cudaIpcMemHandle_t))
     {
         error = "cuda ipc_handle is not a 64-byte hex handle";
         return false;
     }
 
-    CUresult initResult = cuInit(0);
-    if (!CheckCuda(initResult, "cuInit", error))
-    {
-        return false;
-    }
-
-    CUdevice device;
     const int deviceIndex = share.m_cudaDeviceIndex >= 0 ? share.m_cudaDeviceIndex : 0;
-    if (!CheckCuda(cuDeviceGet(&device, deviceIndex), "cuDeviceGet", error))
+    if (!CheckCuda(cudaSetDevice(deviceIndex), "cudaSetDevice", error))
     {
         return false;
     }
 
-    CUcontext context;
-    if (!CheckCuda(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain", error))
+    cudaIpcMemHandle_t handle;
+    std::memset(&handle, 0, sizeof(handle));
+    std::memcpy(&handle, &handleBytes[0], sizeof(handle));
+
+    void* devicePtr = nullptr;
+    if (!CheckCuda(cudaIpcOpenMemHandle(&devicePtr, handle, cudaIpcMemLazyEnablePeerAccess),
+                   "cudaIpcOpenMemHandle", error))
     {
         return false;
     }
 
-    bool contextPushed = false;
-    CUdeviceptr devicePtr = 0;
-    bool ok = false;
-    do
-    {
-        if (!CheckCuda(cuCtxPushCurrent(context), "cuCtxPushCurrent", error))
-        {
-            break;
-        }
-        contextPushed = true;
+    bytes.resize(static_cast<size_t>(share.m_dataSizeBytes));
+    const cudaError_t copyResult = cudaMemcpy(
+        &bytes[0],
+        static_cast<const char*>(devicePtr) + share.m_dataOffset,
+        bytes.size(),
+        cudaMemcpyDeviceToHost);
 
-        CUipcMemHandle ipcHandle;
-        std::memset(&ipcHandle, 0, sizeof(ipcHandle));
-        std::memcpy(&ipcHandle, &handleBytes[0], sizeof(ipcHandle));
-        if (!CheckCuda(cuIpcOpenMemHandle(&devicePtr, ipcHandle, CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS),
-                       "cuIpcOpenMemHandle", error))
-        {
-            break;
-        }
+    std::string closeError;
+    CheckCuda(cudaIpcCloseMemHandle(devicePtr), "cudaIpcCloseMemHandle", closeError);
 
-        bytes.resize(static_cast<size_t>(share.m_dataSizeBytes));
-        if (!CheckCuda(cuMemcpyDtoH(&bytes[0], devicePtr + share.m_dataOffset, bytes.size()), "cuMemcpyDtoH", error))
-        {
-            break;
-        }
-        ok = true;
-    } while (false);
-
-    if (devicePtr != 0)
-    {
-        std::string closeError;
-        CheckCuda(cuIpcCloseMemHandle(devicePtr), "cuIpcCloseMemHandle", closeError);
-    }
-    if (contextPushed)
-    {
-        CUcontext popped;
-        std::string popError;
-        CheckCuda(cuCtxPopCurrent(&popped), "cuCtxPopCurrent", popError);
-    }
-    std::string releaseError;
-    CheckCuda(cuDevicePrimaryCtxRelease(device), "cuDevicePrimaryCtxRelease", releaseError);
-
-    if (!ok)
+    if (!CheckCuda(copyResult, "cudaMemcpy", error))
     {
         bytes.clear();
+        return false;
     }
-    return ok;
+    return true;
 }
 
 } // namespace notch_mock

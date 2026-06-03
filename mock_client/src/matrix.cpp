@@ -1,6 +1,7 @@
 #include "matrix.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -68,6 +69,35 @@ std::string ExpectJson(bool ok, const std::string& transport)
     json << "{\"ok\":" << CaseLogger::Bool(ok)
          << ",\"transport\":" << CaseLogger::Quote(transport) << "}";
     return json.str();
+}
+
+// Extract a top-level JSON string field value, e.g. ExtractJsonStringField(body,
+// "ipc_handle") -> the hex. Sufficient for the unescaped hex/string fields the
+// share-info endpoint returns; not a general JSON parser.
+std::string ExtractJsonStringField(const std::string& body, const std::string& key)
+{
+    const std::string needle = "\"" + key + "\"";
+    size_t k = body.find(needle);
+    if (k == std::string::npos)
+    {
+        return "";
+    }
+    size_t colon = body.find(':', k + needle.size());
+    if (colon == std::string::npos)
+    {
+        return "";
+    }
+    size_t q1 = body.find('"', colon + 1);
+    if (q1 == std::string::npos)
+    {
+        return "";
+    }
+    size_t q2 = body.find('"', q1 + 1);
+    if (q2 == std::string::npos)
+    {
+        return "";
+    }
+    return body.substr(q1 + 1, q2 - q1 - 1);
 }
 
 struct SelectionRow
@@ -1240,6 +1270,16 @@ void RunCudaDeliveryCase(
     std::string cudaAvailableError;
     const bool cudaAvailable = cudaReader->CudaAvailable(cudaAvailableError);
 
+    // Cross-channel handle integrity: the server publishes the IPC handle on two
+    // independent channels (the WS notch-cuda-share-status and this HTTP info
+    // endpoint, both via _alloc_to_info). The handle must be well-formed (64-byte
+    // = 128-hex) and identical across both channels. A mismatch is a real
+    // transport/serialization bug and always fails — even on WSL2.
+    const std::string wsHandleHex = state.cudaShare.m_ipcHandleHex;
+    const std::string httpHandleHex = infoOk ? ExtractJsonStringField(infoResponse.m_body, "ipc_handle") : "";
+    const bool handleWellFormed = wsHandleHex.size() == 128;  // 64-byte IPC handle
+    const bool handleIntegrityOk = handleWellFormed && !httpHandleHex.empty() && httpHandleHex == wsHandleHex;
+
     const std::string inputHash = Sha256Bytes(imageBytes);
     const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
     std::vector<uint8_t> cudaBytes;
@@ -1291,7 +1331,11 @@ void RunCudaDeliveryCase(
     //   - import ok but bytes mismatch                 -> fail (corruption)
     //   - import ok and bytes match                    -> pass
     // The driver error is always captured in cuda_read_error / cuda_unavailable_error.
-    const bool shareContractOk = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk;
+    // shareContractOk also requires cross-channel handle integrity: the WS-status
+    // and HTTP-info handles must agree and be well-formed. A mismatch is a real
+    // transport/serialization bug and fails regardless of platform.
+    const bool shareContractOk =
+        state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk && handleIntegrityOk;
     std::string result;
     if (!cudaAvailable)
     {
@@ -1319,6 +1363,10 @@ void RunCudaDeliveryCase(
         if (state.cudaStatus && !infoOk)
         {
             rec.errors.push_back("cuda_info_unavailable");
+        }
+        if (state.cudaStatus && infoOk && !handleIntegrityOk)
+        {
+            rec.errors.push_back("cuda_handle_integrity_mismatch");
         }
         if (shareContractOk && !cudaRead)
         {
@@ -1355,6 +1403,8 @@ void RunCudaDeliveryCase(
            << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
            << ",\"cuda_status\":" << CaseLogger::Bool(state.cudaStatus)
            << ",\"cuda_info_get\":" << CaseLogger::Bool(infoOk)
+           << ",\"handle_integrity_ok\":" << CaseLogger::Bool(handleIntegrityOk)
+           << ",\"ws_http_handle_match\":" << CaseLogger::Bool(!wsHandleHex.empty() && wsHandleHex == httpHandleHex)
            << ",\"cuda_read\":" << CaseLogger::Bool(cudaRead)
            << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
            << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)

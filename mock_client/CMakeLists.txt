@@ -50,8 +50,9 @@ add_executable(notch_mock_client
 target_link_libraries(notch_mock_client PRIVATE notch_mock_matrix ixwebsocket)
 if(CUDAToolkit_FOUND)
     target_sources(notch_mock_client PRIVATE src/transports/local_cuda_share_reader.cpp)
-    target_link_libraries(notch_mock_client PRIVATE CUDA::cuda_driver)
-    target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_DRIVER=1)
+    # Runtime API (cudart) to match the Notch client's cudaIpc* path.
+    target_link_libraries(notch_mock_client PRIVATE CUDA::cudart)
+    target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_RUNTIME=1)
 endif()
 
 # Transport-agnostic self-test: exercises the matrix with stub transports, no
