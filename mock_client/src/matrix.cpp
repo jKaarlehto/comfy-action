@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -98,6 +99,43 @@ std::string ExtractJsonStringField(const std::string& body, const std::string& k
         return "";
     }
     return body.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// Extract a top-level JSON integer field value, e.g. "cuda_device_index": 0.
+// Returns fallback when the field is absent or unparseable.
+int ExtractJsonIntField(const std::string& body, const std::string& key, int fallback)
+{
+    const std::string needle = "\"" + key + "\"";
+    size_t k = body.find(needle);
+    if (k == std::string::npos)
+    {
+        return fallback;
+    }
+    size_t colon = body.find(':', k + needle.size());
+    if (colon == std::string::npos)
+    {
+        return fallback;
+    }
+    size_t pos = colon + 1;
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t'))
+    {
+        ++pos;
+    }
+    size_t end = pos;
+    if (end < body.size() && (body[end] == '-' || body[end] == '+'))
+    {
+        ++end;
+    }
+    size_t digitsStart = end;
+    while (end < body.size() && body[end] >= '0' && body[end] <= '9')
+    {
+        ++end;
+    }
+    if (end == digitsStart)
+    {
+        return fallback;
+    }
+    return std::atoi(body.substr(pos, end - pos).c_str());
 }
 
 struct SelectionRow
@@ -1298,6 +1336,18 @@ void RunCudaDeliveryCase(
     const bool handleWellFormed = wsHandleHex.size() == 128;  // 64-byte IPC handle
     const bool handleIntegrityOk = handleWellFormed && !httpHandleHex.empty() && httpHandleHex == wsHandleHex;
 
+    // Device-index coherence: the GPU the share lives on must agree across the WS
+    // share-status, the HTTP info endpoint, and /features, and be a real device.
+    // The reader independently verifies it imported on exactly that device (it
+    // checks its own cudaSetDevice took effect). For a positive (an actual byte
+    // transfer) this proves the share and the importer are on the same device and
+    // context, not a coincidental match on a different GPU.
+    const int wsDeviceIndex = state.cudaShare.m_cudaDeviceIndex;
+    const int httpDeviceIndex = infoOk ? ExtractJsonIntField(infoResponse.m_body, "cuda_device_index", -1) : -1;
+    const int featuresDeviceIndex = deployment.m_cudaDeviceIndex;
+    const bool deviceIndexMatch =
+        wsDeviceIndex >= 0 && wsDeviceIndex == httpDeviceIndex && wsDeviceIndex == featuresDeviceIndex;
+
     const std::string inputHash = Sha256Bytes(imageBytes);
     const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
     std::vector<uint8_t> cudaBytes;
@@ -1352,8 +1402,8 @@ void RunCudaDeliveryCase(
     // shareContractOk also requires cross-channel handle integrity: the WS-status
     // and HTTP-info handles must agree and be well-formed. A mismatch is a real
     // transport/serialization bug and fails regardless of platform.
-    const bool shareContractOk =
-        state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk && handleIntegrityOk;
+    const bool shareContractOk = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk &&
+                                 handleIntegrityOk && deviceIndexMatch;
     std::string result;
     if (!cudaAvailable)
     {
@@ -1397,6 +1447,10 @@ void RunCudaDeliveryCase(
         {
             rec.errors.push_back("cuda_handle_integrity_mismatch");
         }
+        if (state.cudaStatus && infoOk && !deviceIndexMatch)
+        {
+            rec.errors.push_back("cuda_device_index_mismatch");
+        }
         if (shareContractOk && !cudaRead)
         {
             rec.errors.push_back("cuda_import_failed");
@@ -1434,6 +1488,10 @@ void RunCudaDeliveryCase(
            << ",\"cuda_info_get\":" << CaseLogger::Bool(infoOk)
            << ",\"handle_integrity_ok\":" << CaseLogger::Bool(handleIntegrityOk)
            << ",\"ws_http_handle_match\":" << CaseLogger::Bool(!wsHandleHex.empty() && wsHandleHex == httpHandleHex)
+           << ",\"device_index_match\":" << CaseLogger::Bool(deviceIndexMatch)
+           << ",\"ws_device_index\":" << wsDeviceIndex
+           << ",\"http_device_index\":" << httpDeviceIndex
+           << ",\"features_device_index\":" << featuresDeviceIndex
            << ",\"cuda_read\":" << CaseLogger::Bool(cudaRead)
            << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
            << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
@@ -1463,7 +1521,7 @@ void RunCudaDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"hash_match\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"device_index_match\":true,\"hash_match\":true}";
     rec.actualJson = actual.str();
     rec.result = result;
 

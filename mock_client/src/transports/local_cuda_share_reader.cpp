@@ -54,6 +54,26 @@ std::string DriverError(CUresult result, const std::string& operation)
     return error;
 }
 
+// Save the current runtime device on construction and restore it on destruction,
+// so a case that binds a specific device for an IPC import never leaks that
+// binding into the next case (which may target a different device index).
+struct DeviceGuard
+{
+    int previous = 0;
+    DeviceGuard() { cudaGetDevice(&previous); }
+    ~DeviceGuard() { cudaSetDevice(previous); }
+};
+
+// Same idea for the driver-API current context: the driver fallback retains and
+// sets the device primary context, so restore whatever context was current
+// before, otherwise a released/foreign context leaks to subsequent work.
+struct ContextGuard
+{
+    CUcontext previous = nullptr;
+    ContextGuard() { cuCtxGetCurrent(&previous); }
+    ~ContextGuard() { cuCtxSetCurrent(previous); }
+};
+
 bool HexToBytes(const std::string& hex, std::vector<uint8_t>& bytes)
 {
     bytes.clear();
@@ -117,6 +137,9 @@ bool TryDriverOpen(
     std::vector<uint8_t>& bytes,
     std::string& error)
 {
+    // Restore the previously-current driver context on every exit.
+    ContextGuard contextGuard;
+
     CUresult initResult = cuInit(0);
     if (initResult != CUDA_SUCCESS)
     {
@@ -212,8 +235,25 @@ bool LocalCudaShareReader::ReadShare(
     }
 
     const int deviceIndex = share.m_cudaDeviceIndex >= 0 ? share.m_cudaDeviceIndex : 0;
+    // Restore the previous current device/context on every exit so binding the
+    // share's device for this import cannot leak into the next case.
+    DeviceGuard deviceGuard;
     if (!CheckCuda(cudaSetDevice(deviceIndex), "cudaSetDevice", error))
     {
+        return false;
+    }
+    // The import must run on exactly the device the server published. Confirm the
+    // binding took effect so a stale/leaked current device can't make us read the
+    // wrong GPU's memory and report a false match.
+    int boundDevice = -1;
+    if (!CheckCuda(cudaGetDevice(&boundDevice), "cudaGetDevice", error))
+    {
+        return false;
+    }
+    if (boundDevice != deviceIndex)
+    {
+        error = "cuda device binding did not take effect (wanted " + std::to_string(deviceIndex) +
+                ", current " + std::to_string(boundDevice) + ")";
         return false;
     }
 
