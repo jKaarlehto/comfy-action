@@ -212,9 +212,10 @@ runs:
         )
         & docker @dockerArgs
         $dockerExit = $LASTEXITCODE
-        $cudaSummary = Join-Path $artifactHost "cuda-summary.md"
-        if ((Test-Path -LiteralPath $cudaSummary) -and $env:GITHUB_STEP_SUMMARY) {
-          Get-Content -LiteralPath $cudaSummary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        foreach ($summary in @((Join-Path $artifactHost "conformance-summary.md"), (Join-Path $artifactHost "cuda-summary.md"))) {
+          if ((Test-Path -LiteralPath $summary) -and $env:GITHUB_STEP_SUMMARY) {
+            Get-Content -LiteralPath $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
         }
         if ($dockerExit -ne 0) {
           exit $dockerExit
@@ -362,9 +363,13 @@ runs:
           & docker logs $serverName *> $serverLog
           & docker rm -f $serverName *> $null
           & docker network rm $networkName *> $null
-          foreach ($cudaSummary in @((Join-Path $serverArtifacts "cuda-summary.md"), (Join-Path $artifactHost "cuda-summary.md"))) {
-            if ((Test-Path -LiteralPath $cudaSummary) -and $env:GITHUB_STEP_SUMMARY) {
-              Get-Content -LiteralPath $cudaSummary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          foreach ($summary in @(
+            (Join-Path $artifactHost "conformance-summary.md"),
+            (Join-Path $serverArtifacts "cuda-summary.md"),
+            (Join-Path $artifactHost "cuda-summary.md")
+          )) {
+            if ((Test-Path -LiteralPath $summary) -and $env:GITHUB_STEP_SUMMARY) {
+              Get-Content -LiteralPath $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
             }
           }
         }

@@ -129,6 +129,62 @@ def annotate_conformance(artifacts: Path, job_label: str) -> None:
     emit_annotation("notice", job_label, summary)
 
 
+def _result_icon(result: str) -> str:
+    return {"pass": "✅", "fail": "❌", "error": "🟥", "skip": "⏭️"}.get(result, "•")
+
+
+def write_conformance_summary(artifacts: Path, job_label: str) -> None:
+    """Render a per-job markdown summary (status, totals, per-phase case table) to
+    conformance-summary.md, which the launch script appends to $GITHUB_STEP_SUMMARY.
+
+    The HTML report is the deep drill-down; this is the at-a-glance page on every
+    conformance job's run page.
+    """
+    result_path = artifacts / "conformance-result.json"
+    if not result_path.is_file():
+        return
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    totals = result.get("totals", {})
+    overall = result.get("result", "")
+    phase = result.get("phase", "")
+
+    cases_by_phase: dict[str, list[dict[str, Any]]] = {}
+    cases_dir = artifacts / "conformance" / "cases"
+    if cases_dir.is_dir():
+        for case_json in sorted(cases_dir.glob("*/case.json")):
+            try:
+                rec = json.loads(case_json.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cases_by_phase.setdefault(str(rec.get("phase", "other")), []).append(rec)
+
+    banner = "✅ PASS" if overall == "pass" else "❌ FAIL"
+    lines = [
+        f"## {job_label} — {banner}",
+        "",
+        f"**pass={totals.get('pass', 0)} · fail={totals.get('fail', 0)} · "
+        f"skip={totals.get('skip', 0)} · error={totals.get('error', 0)}**  (phase `{phase}`)",
+        "",
+    ]
+    phase_order = ["liveness", "discovery", "readiness", "transport-selection", "delivery-local", "delivery-remote"]
+    ordered = [p for p in phase_order if p in cases_by_phase]
+    ordered += [p for p in cases_by_phase if p not in phase_order]
+    for current in ordered:
+        lines.append(f"### {current}")
+        for rec in cases_by_phase[current]:
+            icon = _result_icon(str(rec.get("result", "")))
+            case_id = str(rec.get("case_id", ""))
+            title = str(rec.get("title", case_id))
+            errors = ", ".join(rec.get("errors", []) or [])
+            suffix = f" — `{errors}`" if errors else ""
+            lines.append(f"- {icon} `{case_id}` — {title}{suffix}")
+        lines.append("")
+    (artifacts / "conformance-summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def read_url_json(url: str, timeout_seconds: int = 10) -> Any:
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
@@ -400,6 +456,15 @@ def _render_cuda_summary(diag: dict[str, Any]) -> str:
     lines = [
         f"### CUDA environment & launch assertions ({side})",
         "",
+    ]
+    if diag.get("cuda_applicable") is False:
+        lines += [
+            "> No GPU visible in this container — CUDA IPC is not used here (e.g. the remote "
+            "client is HTTP-only by design, so CUDA is rejected by reachability). The driver "
+            "check is not applicable; the namespace/flag checks below still verify the launch config.",
+            "",
+        ]
+    lines += [
         "| fact | value |",
         "| --- | --- |",
         f"| display driver (host-mapped) | `{diag.get('driver_version') or 'unknown'}` |",
@@ -476,13 +541,19 @@ def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: 
         driver_major = int(driver.split(".")[0]) if driver else 0
     except ValueError:
         driver_major = 0
-    assertions.append(
-        {
-            "name": "driver_supports_legacy_cuda_ipc",
-            "ok": driver_major >= 510,
-            "detail": f"host display driver {driver or 'unknown'} (legacy CUDA IPC needs >= R510)",
-        }
-    )
+    # A container with no visible GPU (e.g. the remote client, which only needs
+    # HTTP and never does CUDA IPC) reports no driver. The driver-support check
+    # only applies where CUDA IPC is actually used, so gate it on a GPU being
+    # present; otherwise it is not-applicable, not a failure.
+    diag["cuda_applicable"] = driver_major > 0
+    if driver_major > 0:
+        assertions.append(
+            {
+                "name": "driver_supports_legacy_cuda_ipc",
+                "ok": driver_major >= 510,
+                "detail": f"host display driver {driver} (legacy CUDA IPC needs >= R510)",
+            }
+        )
 
     if expect_ipc_host:
         if host_ipc_ns:
@@ -791,6 +862,7 @@ def main() -> int:
             }
             write_json(artifacts / "compatibility-result.json", compatibility)
             annotate_conformance(artifacts, JOB_LABELS.get(mode, "Remote delivery"))
+            write_conformance_summary(artifacts, JOB_LABELS.get(mode, "Remote delivery"))
             return 0 if passed else 1
 
         clone_repo(runner, args.comfyui_repository, args.comfyui_ref, comfy_dir, "git.log")
@@ -963,6 +1035,7 @@ def main() -> int:
             }
             write_json(artifacts / "compatibility-result.json", compatibility)
             annotate_conformance(artifacts, JOB_LABELS.get(mode, conformance_phase))
+            write_conformance_summary(artifacts, JOB_LABELS.get(mode, conformance_phase))
             return 0 if passed else 1
 
         result["result"] = "pass"
