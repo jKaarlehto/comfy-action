@@ -165,6 +165,16 @@ void CaseLogger::WriteIndex()
 
 std::string CaseLogger::PrettyPrint(const std::string& compactJson)
 {
+    // Defensive: this only formats JSON, but it may be handed non-JSON (e.g. a
+    // multipart request body). Clamp the indent to [0, kMaxIndent] so unbalanced
+    // or binary input can never drive string::append() to a huge/overflowing size
+    // (which throws std::length_error and terminates the process).
+    const int kMaxIndent = 64;
+    auto pad = [](int level) -> std::string {
+        if (level < 0) level = 0;
+        if (level > kMaxIndent) level = kMaxIndent;
+        return std::string(static_cast<size_t>(level) * 2, ' ');
+    };
     std::string out;
     int indent = 0;
     bool inString = false;
@@ -212,20 +222,20 @@ std::string CaseLogger::PrettyPrint(const std::string& compactJson)
                 ++indent;
                 out += c;
                 out += '\n';
-                out.append(static_cast<size_t>(indent) * 2, ' ');
+                out += pad(indent);
             }
             break;
         case '}':
         case ']':
-            --indent;
+            if (indent > 0) --indent;
             out += '\n';
-            out.append(static_cast<size_t>(indent) * 2, ' ');
+            out += pad(indent);
             out += c;
             break;
         case ',':
             out += c;
             out += '\n';
-            out.append(static_cast<size_t>(indent) * 2, ' ');
+            out += pad(indent);
             break;
         case ':':
             out += ": ";

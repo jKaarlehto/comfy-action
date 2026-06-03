@@ -928,7 +928,22 @@ void AppendDeliveryEvidence(
     logger.AppendCaseFile(index, caseId, "negotiation.json", CaseLogger::PrettyPrint(negotiationJson) + "\n");
     if (!injectRequestJson.empty())
     {
-        logger.AppendCaseFile(index, caseId, "inject-request.json", CaseLogger::PrettyPrint(injectRequestJson) + "\n");
+        // Multipart requests carry binary form data, not JSON. Pretty-printing
+        // binary as JSON is meaningless (and historically drove the formatter to
+        // crash); write a small summary for multipart, pretty JSON otherwise.
+        const bool looksJson = injectRequestJson[0] == '{' || injectRequestJson[0] == '[';
+        if (looksJson)
+        {
+            logger.AppendCaseFile(index, caseId, "inject-request.json",
+                                  CaseLogger::PrettyPrint(injectRequestJson) + "\n");
+        }
+        else
+        {
+            std::ostringstream note;
+            note << "{\"note\":\"multipart/form-data body omitted (binary)\",\"bytes\":"
+                 << injectRequestJson.size() << "}";
+            logger.AppendCaseFile(index, caseId, "inject-request.json", CaseLogger::PrettyPrint(note.str()) + "\n");
+        }
     }
     if (!injectResponseJson.empty())
     {
@@ -975,6 +990,24 @@ void AppendDeliveryEvidence(
 // The on-disk output extension the server uses for a given output type. Workflow-
 // derived types carry their own format (a path's own extension, a File3D's glb);
 // transcoded types are encoded into a fixed container.
+// The server's output routes guard the consumer/output id with ^[A-Za-z0-9_-]+$
+// (resolve_output_artifact / _SAFE_ID), so the http GET 404s on any other
+// character. Generated case ids use '.' as a separator, so derive a safe
+// consumer id (dots and any other disallowed char -> '-') for output routing
+// while the dotted case id stays the human-facing record id.
+std::string SafeConsumerId(const std::string& caseId)
+{
+    std::string out;
+    out.reserve(caseId.size());
+    for (char c : caseId)
+    {
+        const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                          c == '-';
+        out.push_back(safe ? c : '-');
+    }
+    return out;
+}
+
 std::string OutputExtensionForType(const std::string& outputType, const std::string& sourcePath)
 {
     if (outputType == "file_path") return ExtensionFromPath(sourcePath);
@@ -1110,7 +1143,7 @@ void RunFilePathDeliveryCase(
         return;
     }
 
-    const std::string consumerId = caseId;
+    const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson(contract.inputType, contract.slotName);
     notch_comfy::WorkflowSubmissionRequest req;
     req.m_workflowJson = workflowJson;
@@ -1204,6 +1237,7 @@ void RunFilePathDeliveryCase(
     std::string outputPath;
     std::string outputError;
     bool outputRead = false;
+    int outputHttpStatus = 0;  // captured for the http transport so a 404/500 is visible in the case
     if (state.outputReady)
     {
         if (transport == "disk")
@@ -1237,15 +1271,22 @@ void RunFilePathDeliveryCase(
             getRequest.m_path = state.output.m_url;
             notch_comfy::HttpResponse getResponse;
             std::string getError;
-            if (http.Send(getRequest, getResponse, getError) && getResponse.m_statusCode == 200)
+            const bool sent = http.Send(getRequest, getResponse, getError);
+            outputHttpStatus = getResponse.m_statusCode;
+            if (sent && getResponse.m_statusCode == 200)
             {
                 outputBytes.assign(getResponse.m_body.begin(), getResponse.m_body.end());
                 outputRead = true;
                 outputPath = state.output.m_url;
             }
+            else if (!sent)
+            {
+                outputError = getError.empty() ? "http output fetch transport error" : getError;
+            }
             else
             {
-                outputError = getError.empty() ? "http output fetch failed" : getError;
+                outputError = "http output fetch returned HTTP " + std::to_string(getResponse.m_statusCode) +
+                              " for " + state.output.m_url;
             }
         }
     }
@@ -1343,6 +1384,8 @@ void RunFilePathDeliveryCase(
            << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
            << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
+           << ",\"output_url\":" << CaseLogger::Quote(state.output.m_url)
+           << ",\"output_http_status\":" << outputHttpStatus
            << ",\"named_route_handoff_ok\":" << CaseLogger::Bool(namedRouteHandoffOk)
            << ",\"verify_ok\":" << CaseLogger::Bool(verifyOk)
            << ",\"verification\":" << (verify.detail.empty() ? "null" : verify.detail)
@@ -1449,7 +1492,7 @@ void RunCudaDeliveryCase(
     std::vector<uint8_t> imageBytes = BuildFloat32RgbPattern(width, height);
     std::vector<uint8_t> expectedCudaBytes = BuildExpectedFloat32RgbaPattern(width, height);
 
-    const std::string consumerId = caseId;
+    const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson("IMAGE", "image");
     notch_comfy::WorkflowSubmissionRequest req;
     req.m_workflowJson = workflowJson;
