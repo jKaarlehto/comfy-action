@@ -9,6 +9,7 @@ namespace notch_mock
 class LocalCudaShareReader : public ICudaShareReader
 {
 public:
+    bool CudaAvailable(std::string& error) override;
     bool ReadShare(
         const notch_comfy::CudaShareStatus& share,
         std::vector<uint8_t>& bytes,

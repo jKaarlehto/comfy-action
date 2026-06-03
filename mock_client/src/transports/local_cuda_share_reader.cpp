@@ -59,6 +59,25 @@ bool HexToBytes(const std::string& hex, std::vector<uint8_t>& bytes)
 
 } // namespace
 
+bool LocalCudaShareReader::CudaAvailable(std::string& error)
+{
+    if (!CheckCuda(cuInit(0), "cuInit", error))
+    {
+        return false;
+    }
+    int deviceCount = 0;
+    if (!CheckCuda(cuDeviceGetCount(&deviceCount), "cuDeviceGetCount", error))
+    {
+        return false;
+    }
+    if (deviceCount <= 0)
+    {
+        error = "no CUDA device present";
+        return false;
+    }
+    return true;
+}
+
 bool LocalCudaShareReader::ReadShare(
     const notch_comfy::CudaShareStatus& share,
     std::vector<uint8_t>& bytes,

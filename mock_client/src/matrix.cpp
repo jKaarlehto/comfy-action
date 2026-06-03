@@ -1227,6 +1227,12 @@ void RunCudaDeliveryCase(
     std::string infoError;
     bool infoOk = http.Send(infoRequest, infoResponse, infoError) && infoResponse.m_statusCode == 200;
 
+    // CUDA availability is the ONLY skip gate. If CUDA is available, a failed
+    // import is a real failure (e.g. a wrong/malformed handle from the server),
+    // never hidden as a skip.
+    std::string cudaAvailableError;
+    const bool cudaAvailable = cudaReader->CudaAvailable(cudaAvailableError);
+
     const std::string inputHash = Sha256Bytes(imageBytes);
     const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
     std::vector<uint8_t> cudaBytes;
@@ -1269,61 +1275,52 @@ void RunCudaDeliveryCase(
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    // The CUDA contract has two tiers. The *share-status* contract (server
-    // publishes a valid share + shape, info endpoint serves it) must hold — that
-    // is the case title "publishes a valid share". The *IPC byte-readback*
-    // (client imports the handle and reads device memory) is an additional,
-    // environment-sensitive check: when the import itself fails (e.g. the CI
-    // runtime cannot do CUDA IPC), the case *skips* with the captured driver
-    // error rather than failing, so the suite stays green on what is provable and
-    // surfaces exactly why the readback was unavailable. A successful import with
-    // mismatched bytes is a real failure (corruption).
+    // Verdict, with CUDA availability as the ONLY skip gate:
+    //   - CUDA not available in this environment      -> skip (cuda_unavailable)
+    //   - share-status/shape/info contract broken     -> fail
+    //   - CUDA available but import/read failed        -> fail (e.g. wrong handle;
+    //                                                     never hidden as a skip)
+    //   - import ok but bytes mismatch                 -> fail (corruption)
+    //   - import ok and bytes match                    -> pass
+    // The driver error is always captured in cuda_read_error / cuda_unavailable_error.
     const bool shareContractOk = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk;
-    if (!state.queued)
-    {
-        rec.errors.push_back("unexpected_reject");
-    }
-    if (state.queued && !state.terminalSuccess)
-    {
-        rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
-    }
-    if (state.terminalSuccess && !state.cudaStatus)
-    {
-        rec.errors.push_back("cuda_status_missing");
-    }
-    if (state.cudaStatus && !shapeOk)
-    {
-        rec.errors.push_back("cuda_metadata_mismatch");
-    }
-    if (state.cudaStatus && !infoOk)
-    {
-        rec.errors.push_back("cuda_info_unavailable");
-    }
-    if (cudaRead && !hashMatch)
-    {
-        rec.errors.push_back("output_hash_mismatch");
-    }
-
-    // Verdict: share contract broken -> fail; share ok but IPC import failed ->
-    // skip (capability-gated, driver error captured); import ok + bytes match ->
-    // pass; import ok + bytes wrong -> fail.
     std::string result;
-    if (!shareContractOk)
-    {
-        result = "fail";
-    }
-    else if (!cudaRead)
+    if (!cudaAvailable)
     {
         result = "skip";
-        rec.errors.push_back("cuda_ipc_readback_unavailable");
-    }
-    else if (!hashMatch)
-    {
-        result = "fail";
+        rec.errors.push_back("cuda_unavailable");
     }
     else
     {
-        result = "pass";
+        if (!state.queued)
+        {
+            rec.errors.push_back("unexpected_reject");
+        }
+        if (state.queued && !state.terminalSuccess)
+        {
+            rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
+        }
+        if (state.terminalSuccess && !state.cudaStatus)
+        {
+            rec.errors.push_back("cuda_status_missing");
+        }
+        if (state.cudaStatus && !shapeOk)
+        {
+            rec.errors.push_back("cuda_metadata_mismatch");
+        }
+        if (state.cudaStatus && !infoOk)
+        {
+            rec.errors.push_back("cuda_info_unavailable");
+        }
+        if (shareContractOk && !cudaRead)
+        {
+            rec.errors.push_back("cuda_import_failed");
+        }
+        if (cudaRead && !hashMatch)
+        {
+            rec.errors.push_back("output_hash_mismatch");
+        }
+        result = (shareContractOk && cudaRead && hashMatch) ? "pass" : "fail";
     }
 
     std::ostringstream hashes;
@@ -1361,6 +1358,11 @@ void RunCudaDeliveryCase(
            << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
            << ",\"output_sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"expected_output_sha256\":" << CaseLogger::Quote(expectedOutputHash);
+    actual << ",\"cuda_available\":" << CaseLogger::Bool(cudaAvailable);
+    if (!cudaAvailable && !cudaAvailableError.empty())
+    {
+        actual << ",\"cuda_unavailable_error\":" << CaseLogger::Quote(cudaAvailableError);
+    }
     if (!cudaReadError.empty())
     {
         actual << ",\"cuda_read_error\":" << CaseLogger::Quote(cudaReadError);

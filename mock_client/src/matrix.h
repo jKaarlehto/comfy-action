@@ -29,6 +29,11 @@ class ICudaShareReader
 {
 public:
     virtual ~ICudaShareReader() {}
+    // Whether this environment has a usable CUDA driver + device (cuInit + a
+    // device present). This is the ONLY thing that gates a skip: if CUDA is
+    // available, a failed share import is a real failure (e.g. a wrong handle),
+    // not a skip. error carries the driver reason when unavailable.
+    virtual bool CudaAvailable(std::string& error) = 0;
     virtual bool ReadShare(
         const notch_comfy::CudaShareStatus& share,
         std::vector<uint8_t>& bytes,
