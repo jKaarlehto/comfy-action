@@ -51,6 +51,22 @@ enum class Phase
     DeliveryRemote,
 };
 
+enum class VerificationClass
+{
+    ByteExact,     // delivered bytes == source bytes (file_path, file_3d)
+    Structural,    // canonical-JSON(delivered) == canonical-JSON(expected) (load3d_camera)
+    DecodedImage,  // stb_image dims+channels+sample hash (image over disk/http)
+    Integrity,     // exists + non-empty (+ server hash if present) (audio, video, mesh GLB)
+    CudaRaw,       // raw float32 RGBA buffer vs expected pattern (image over cuda)
+};
+
+struct VerifyResult
+{
+    bool ok = false;
+    std::string detail;   // compact JSON fragment describing the comparison
+    std::string error;    // a stable error code on failure, e.g. "output_hash_mismatch"
+};
+
 struct MatrixOptions
 {
     Phase phase = Phase::Negotiation;

@@ -44,6 +44,7 @@ add_library(notch_mock_matrix STATIC
     src/matrix.cpp
     src/case_logger.cpp
     src/hash_utils.cpp
+    src/verify/verify_byte_exact.cpp
 )
 target_include_directories(notch_mock_matrix PUBLIC src)
 target_link_libraries(notch_mock_matrix PUBLIC notch_comfy_client)
@@ -70,3 +71,7 @@ enable_testing()
 add_executable(notch_mock_stub_check tests/stub_check.cpp)
 target_link_libraries(notch_mock_stub_check PRIVATE notch_mock_matrix)
 add_test(NAME notch_mock_stub_check COMMAND notch_mock_stub_check)
+
+add_executable(notch_mock_verify_check tests/verify_check.cpp)
+target_link_libraries(notch_mock_verify_check PRIVATE notch_mock_matrix)
+add_test(NAME notch_mock_verify_check COMMAND notch_mock_verify_check)
