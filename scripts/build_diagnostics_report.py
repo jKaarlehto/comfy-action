@@ -242,6 +242,57 @@ def render_report(run: dict, template_path: Path) -> str:
     )
 
 
+def _result_icon(result: str) -> str:
+    return {"pass": "✅", "fail": "❌", "error": "🟥", "skip": "⏭️"}.get(result, "•")
+
+
+def render_run_markdown(run: dict) -> str:
+    """Render an aggregate markdown overview of the whole run (every job's totals
+    plus the run rollup), for the report job's GitHub Step Summary — the same kind
+    of at-a-glance md the per-job conformance/CUDA summaries provide, but spanning
+    all jobs. The HTML report remains the deep drill-down.
+    """
+    summary = run.get("summary", {})
+    banner = "✅ PASS" if summary.get("result") == "pass" else "❌ FAIL"
+    lines = [
+        f"## Conformance run — {banner}",
+        "",
+        f"**jobs={summary.get('jobs', 0)} · pass={summary.get('pass', 0)} · "
+        f"fail={summary.get('fail', 0)} · skip={summary.get('skip', 0)} · "
+        f"error={summary.get('error', 0)}**",
+        "",
+        "| job | result | pass | fail | skip | error |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for job in run.get("jobs", []):
+        totals = job.get("totals", {})
+        lines.append(
+            f"| {job.get('label', job.get('name', ''))} | {_result_icon(job.get('result', ''))} "
+            f"{job.get('result', '') or '—'} | {totals.get('pass', 0)} | {totals.get('fail', 0)} | "
+            f"{totals.get('skip', 0)} | {totals.get('error', 0)} |"
+        )
+    lines.append("")
+    # Surface failing cases by name so the run page shows what broke without the HTML.
+    failing = [
+        (job.get("label", job.get("name", "")), case)
+        for job in run.get("jobs", [])
+        for case in job.get("cases", [])
+        if case.get("result") in ("fail", "error")
+    ]
+    if failing:
+        lines.append("### Failing cases")
+        for label, case in failing:
+            errors = ", ".join(case.get("errors", []) or [])
+            suffix = f" — `{errors}`" if errors else ""
+            lines.append(f"- ❌ `{case.get('id', '')}` ({label}){suffix}")
+        lines.append("")
+    lines.append(
+        "The full single-file `diagnostics-report.html` (every job, all cases, logs, "
+        "diagnostics) is attached as the **diagnostics-report** artifact — download and open directly."
+    )
+    return "\n".join(lines) + "\n"
+
+
 def discover_jobs(artifacts_root: Path) -> dict:
     """Map each downloaded artifact folder to a known job by its mode in the name.
 
@@ -269,6 +320,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build a single-file diagnostics report from CI artifacts")
     parser.add_argument("--artifacts-root", required=True, help="dir containing one subfolder per downloaded job artifact")
     parser.add_argument("--output", default="diagnostics-report.html")
+    parser.add_argument("--summary-output", default="diagnostics-summary.md",
+                        help="aggregate markdown overview for the run's Step Summary")
     parser.add_argument("--template", default=str(Path(__file__).with_name("report_template.html")))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
@@ -279,6 +332,8 @@ def main(argv=None) -> int:
     run = aggregate_run(jobs, {"id": args.run_id, "repository": args.repository, "ref": args.ref})
     html = render_report(run, Path(args.template))
     Path(args.output).write_text(html, encoding="utf-8")
+    if args.summary_output:
+        Path(args.summary_output).write_text(render_run_markdown(run), encoding="utf-8")
     summary = run["summary"]
     print(
         f"diagnostics report: {args.output} jobs={summary['jobs']} "
