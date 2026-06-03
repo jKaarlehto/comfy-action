@@ -3,11 +3,13 @@
 // contract logic can be compiled and exercised without network access. The
 // real adapters in src/transports are checked separately by the Docker build.
 
+#include <cassert>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "case_logger.h"
+#include "delivery_types.h"
 #include "matrix.h"
 
 namespace
@@ -130,5 +132,41 @@ int main()
         return 1;
     }
     std::printf("stub conformance self-test OK\n");
+
+    // Delivery type-table cardinalities (spec §4): pure set arithmetic, no server.
+    {
+        const std::vector<std::string> fullServer = {"cuda", "disk", "http"};
+
+        // local topology: client reaches everything -> image x3 + 6 non-image x2 = 15
+        // positives, and 0 reachability rejects (every type-allowed transport is reachable).
+        int localPositives = 0;
+        int localReachabilityRejects = 0;
+        for (const auto& type : notch_mock::DeliveryTypes())
+        {
+            const auto usable = notch_mock::UsableTransports(type, fullServer, fullServer);
+            localPositives += static_cast<int>(usable.size());
+            localReachabilityRejects +=
+                static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
+        }
+        assert(localPositives == 15);
+        assert(localReachabilityRejects == 0);
+
+        // remote-http topology: client reaches only http -> 7 positives (one per type),
+        // and 8 reachability rejects (image: cuda+disk unreachable = 2; each of 6
+        // non-image: disk unreachable = 1).
+        const std::vector<std::string> httpOnlyClient = {"http"};
+        int remotePositives = 0;
+        int remoteReachabilityRejects = 0;
+        for (const auto& type : notch_mock::DeliveryTypes())
+        {
+            const auto usable = notch_mock::UsableTransports(type, fullServer, httpOnlyClient);
+            remotePositives += static_cast<int>(usable.size());
+            remoteReachabilityRejects +=
+                static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
+        }
+        assert(remotePositives == 7);
+        assert(remoteReachabilityRejects == 8);
+    }
+    std::printf("delivery type-table cardinality assertions OK\n");
     return 0;
 }
