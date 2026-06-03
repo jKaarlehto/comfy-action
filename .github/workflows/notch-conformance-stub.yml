@@ -21,7 +21,7 @@ on:
       extension_ref:
         description: 'ComfyUI-Notch ref (tag/branch/commit)'
         required: false
-        default: ''
+        default: 'v0.3.0'
 
 jobs:
   stub:
@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.event.inputs.extension_repository || 'jKaarlehto/ComfyUI-Notch' }}
-          ref: ${{ github.event.inputs.extension_ref || '' }}
+          ref: ${{ github.event.inputs.extension_ref || 'v0.3.0' }}
           path: _ext
 
       - name: Local build check (compile-check + stub self-test)
