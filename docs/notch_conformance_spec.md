@@ -321,14 +321,25 @@ nearly free.
 
 - **Output types (7):** `image`, `audio`, `video`, `file_3d`, `mesh`,
   `load3d_camera`, `file_path` (`core/data_types.py` `_NOTCH_OUTPUT_TYPES`).
-- **Verification class per type** (how "bytes match" is checked):
-  - **byte-exact (SHA-256):** pass-through file artifacts — `file_path`,
-    `file_3d`.
-  - **structural:** deterministically-serialized payloads — `mesh`,
-    `load3d_camera` (JSON).
-  - **decoded (dims + dtype + sample hash):** codec-transcoded payloads —
-    `image`, `audio`, `video` — because the delivered bytes legitimately differ
-    from the input; verify decoded shape/type and a deterministic sample.
+- **Input transport per type** (how the value reaches Comfy — fidelity matters):
+  - **multipart upload (bytes really travel client→server):** `image`, `audio`,
+    `video`, `file_3d`, `mesh` — the client uploads the source bytes, so the round
+    trip exercises real input transport, not a server-local shortcut.
+  - **inline value:** `load3d_camera` (a JSON camera dict in the inject body).
+  - **server-staged path:** `file_path` — a path string to a file already on the
+    server. This is **"server file-path copy"** coverage; it does NOT prove
+    client-uploaded bytes (nothing leaves the client) unless a generic
+    upload-to-temp mechanism is added.
+- **Verification class per type** (how the delivered output is checked):
+  - **byte-exact (SHA-256):** `file_path` only — the output is an exact `copy2`
+    of the staged server file, so fetched/copied bytes equal the source.
+  - **structural:** `file_3d`, `mesh`, `load3d_camera` — these reserialize
+    (`File3D.save_to` re-emits the container, `save_glb_from_mesh` writes a GLB,
+    `save_json_file` writes JSON), so delivered bytes legitimately differ from the
+    upload — verify structurally (valid/parseable container + coherent shape), NOT
+    an exact source hash.
+  - **decoded (dims + dtype + sample hash):** `image`, `audio`, `video` —
+    codec-transcoded; verify decoded shape/type and a deterministic sample.
 - **Transports:** `cuda` (image-only, host-local only), `disk`, `http`.
 - **Topologies → real client-reachable set:** `local` `{cuda,disk,http}`;
   `remote-http` `{http}`; `remote-route-disk` `{disk,http}`.
@@ -346,6 +357,54 @@ nearly free.
 | file-availability gate (runtime) | — | — | missing input file ⇒ run blocked = **1** | 1 |
 
 **Total = 52 enumerated delivery cases.**
+
+**Automatic generation — the arithmetic *is* the case set.** Cases are never
+hand-written. The generator iterates `topology × type × transport` over
+Σ={cuda,disk,http} and classifies each triple by the selection arithmetic, so the
+counts above are a consequence of the loop, not a hand-count:
+
+```text
+for topology in [local, remote-http, remote-route-disk]:
+  for type in the 7 output types:
+    for X in {cuda, disk, http}:
+      allowed   = X in type-allowed(type)         # cuda iff image
+      server_ok = X in server-available(topology) # GPU runner -> {cuda,disk,http}
+      client_ok = X in client-reachable(topology) # local{c,d,h} http-only{h} route-disk{d,h}
+      usable    = allowed and server_ok and client_ok
+      if usable:           emit POSITIVE(topology, type, X)
+      elif not allowed:    emit REJECT(topology, type, X, axis=type)    # only in `local`
+      elif not server_ok:  emit REJECT(topology, type, X, axis=server)
+      elif not client_ok:  emit REJECT(topology, type, X, axis=client)
+```
+
+The single de-dup rule — **type-axis rejects are emitted only in `local`** — turns
+the raw 21-per-topology product into the curated 22/30: a transport excluded by
+*type* (cuda for a non-image) rejects identically in every topology, so it is
+proved once; rejects by *server* or *client* are topology-specific and emitted per
+topology. This yields exactly `local` 15 + 6 = 21 (+ file-availability gate = 22),
+`remote-http` 7 + 8 = 15, `remote-route-disk` 14 + 1 = 15 → remote total 30.
+
+**Self-describing case id (derived, never hand-named):**
+
+```text
+<topology>.<type>.<transport>.<verdict>      verdict in {deliver, reject-type, reject-server, reject-client}
+```
+
+The id and the expectation come from the same arithmetic, so they cannot disagree:
+
+| id | the expectation it encodes |
+|---|---|
+| `local.image.cuda.deliver` | cuda usable for image locally → inject (multipart), execute, deliver over cuda, verify cuda-raw |
+| `local.audio.cuda.reject-type` | cuda not type-allowed for audio → `SelectOutputTransport` refuses before inject (no downgrade) |
+| `remote-http.image.disk.reject-client` | disk type-allowed + server-available but client can't reach the filesystem → refused before inject |
+| `remote-route-disk.image.cuda.reject-client` | cuda is host-local-only, unreachable from the route-disk client → refused before inject |
+
+`POSITIVE` expects: client negotiates X (must be usable), inject per the type's
+input transport, execute, deliver over X, verify per the type's verification class.
+`REJECT` expects: the client refuses X before inject and names the excluding axis;
+no request reaches the server. The per-topology coherence assertion
+(`delivered == usable`, `rejected == type-allowed − usable`, plus the type-reject
+set) is then a check over the generated ids, not a separate hand list.
 
 **Capability gating (skips are self-clearing, never silent):**
 

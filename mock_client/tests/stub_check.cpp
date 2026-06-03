@@ -182,6 +182,70 @@ int main()
         assert(remoteRoutePositives == 14);
         assert(remoteRouteRejects == 1);
     }
+
+    // Automatic case generation (spec §4 "the arithmetic is the case set"): the
+    // generated descriptors per topology must total local 21, remote-http 15,
+    // remote-route-disk 15 — purely from the topology x type x transport loop.
+    {
+        const std::vector<std::string> full = {"cuda", "disk", "http"};
+        const notch_mock::TopologyConfig local{"local", full, full};
+        const notch_mock::TopologyConfig remoteHttp{"remote-http", full, {"http"}};
+        const notch_mock::TopologyConfig routeDisk{"remote-route-disk", full, {"disk", "http"}};
+
+        const auto localCases = notch_mock::GenerateDeliveryCases(local);
+        const auto remoteHttpCases = notch_mock::GenerateDeliveryCases(remoteHttp);
+        const auto routeDiskCases = notch_mock::GenerateDeliveryCases(routeDisk);
+        assert(localCases.size() == 21);
+        assert(remoteHttpCases.size() == 15);
+        assert(routeDiskCases.size() == 15);
+
+        // local verdict distribution: 15 deliver positives + 6 type-rejects, no others.
+        int deliver = 0, rejectType = 0, other = 0;
+        for (const auto& descriptor : localCases)
+        {
+            if (descriptor.verdict == "deliver")
+                ++deliver;
+            else if (descriptor.verdict == "reject-type")
+                ++rejectType;
+            else
+                ++other;
+        }
+        assert(deliver == 15);
+        assert(rejectType == 6);
+        assert(other == 0);
+
+        // remote-http: 7 deliver + 8 reject-client (no type-rejects re-tested here).
+        int rDeliver = 0, rRejectClient = 0, rRejectType = 0;
+        for (const auto& descriptor : remoteHttpCases)
+        {
+            if (descriptor.verdict == "deliver")
+                ++rDeliver;
+            else if (descriptor.verdict == "reject-client")
+                ++rRejectClient;
+            else if (descriptor.verdict == "reject-type")
+                ++rRejectType;
+        }
+        assert(rDeliver == 7);
+        assert(rRejectClient == 8);
+        assert(rRejectType == 0);
+
+        // ids are self-describing and derived: spot-check a few.
+        bool sawImageCudaDeliver = false, sawAudioCudaRejectType = false, sawImageDiskRejectClient = false;
+        for (const auto& descriptor : localCases)
+        {
+            if (descriptor.id == "local.image.cuda.deliver") sawImageCudaDeliver = true;
+            if (descriptor.id == "local.audio.cuda.reject-type") sawAudioCudaRejectType = true;
+        }
+        for (const auto& descriptor : remoteHttpCases)
+        {
+            if (descriptor.id == "remote-http.image.disk.reject-client") sawImageDiskRejectClient = true;
+        }
+        assert(sawImageCudaDeliver);
+        assert(sawAudioCudaRejectType);
+        assert(sawImageDiskRejectClient);
+    }
+
     std::printf("delivery type-table cardinality assertions OK\n");
+    std::printf("delivery case-generation assertions OK (local=21 remote-http=15 route-disk=15)\n");
     return 0;
 }
