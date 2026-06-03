@@ -1299,7 +1299,12 @@ void RunFilePathDeliveryCase(
     // precondition; the verifier decides the match.
     const VerifyResult verify = outputRead ? RunVerifier(contract, sourceBytes, outputBytes) : VerifyResult{};
     const bool verifyOk = outputRead && verify.ok;
-    const bool namedRouteHandoffOk = !useNamedRouteDisk ||
+    // The named-route handoff only applies to the *disk* transport. In the
+    // remote-route-disk topology http is also usable, and an http delivery returns
+    // a url (not a {route_id, relative_path}); checking the named-route handoff on
+    // an http case would wrongly fail an otherwise-good delivery.
+    const bool routeHandoffApplies = useNamedRouteDisk && transport == "disk";
+    const bool namedRouteHandoffOk = !routeHandoffApplies ||
         (state.outputReady && state.output.m_namedRouteId == options.namedRouteId &&
          IsSafeRelativePath(state.output.m_relativePath) && state.output.m_path.empty());
     std::string diagnosticsJson;
