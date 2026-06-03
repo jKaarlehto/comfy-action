@@ -37,6 +37,8 @@ echo "== conformance stub self-test =="
 g++ "${common[@]}" \
   "$mock_root/tests/stub_check.cpp" "$mock_root/src/matrix.cpp" "$mock_root/src/case_logger.cpp" \
   "$mock_root/src/hash_utils.cpp" "$mock_root/src/delivery_types.cpp" \
+  "$mock_root/src/verify/verify_byte_exact.cpp" "$mock_root/src/verify/verify_integrity.cpp" \
+  "$mock_root/src/verify/verify_structural.cpp" \
   "$iface/src/client_interface.cpp" "$iface/third_party/jsonxx/jsonxx.cc" -o "$tmp/stub_check"
 (cd "$tmp" && "$tmp/stub_check")
 rm -rf "$tmp/stub-out"

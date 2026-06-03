@@ -9,7 +9,11 @@
 #include <sstream>
 #include <thread>
 
+#include "delivery_types.h"
 #include "hash_utils.h"
+#include "verify/verify_byte_exact.h"
+#include "verify/verify_integrity.h"
+#include "verify/verify_structural.h"
 
 namespace notch_mock
 {
@@ -968,6 +972,48 @@ void AppendDeliveryEvidence(
     }
 }
 
+// The on-disk output extension the server uses for a given output type. Workflow-
+// derived types carry their own format (a path's own extension, a File3D's glb);
+// transcoded types are encoded into a fixed container.
+std::string OutputExtensionForType(const std::string& outputType, const std::string& sourcePath)
+{
+    if (outputType == "file_path") return ExtensionFromPath(sourcePath);
+    if (outputType == "file_3d") return "glb";
+    if (outputType == "mesh") return "glb";
+    if (outputType == "image") return "png";
+    if (outputType == "audio") return "wav";
+    if (outputType == "video") return "mp4";
+    if (outputType == "load3d_camera") return "json";
+    return "bin";
+}
+
+// A default load3d_camera value (inline dict merged into the server's defaults).
+const char* const kCameraInlineJson = "{\"position\":[0.0,0.0,5.0],\"target\":[0.0,0.0,0.0],\"fov\":35.0}";
+
+// Run a verifier for the type's verification class against the delivered bytes.
+// expectedBytes is the uploaded/source bytes (used by byte-exact only).
+VerifyResult RunVerifier(const DeliveryTypeContract& contract,
+                         const std::vector<uint8_t>& expectedBytes,
+                         const std::vector<uint8_t>& deliveredBytes)
+{
+    switch (contract.verify)
+    {
+    case VerificationClass::ByteExact:
+        return VerifyByteExact(expectedBytes, deliveredBytes);
+    case VerificationClass::Structural:
+        return VerifyStructural(deliveredBytes);
+    case VerificationClass::DecodedImage:
+        // stb_image is not vendored yet; until then verify the delivered image is a
+        // real, non-empty artifact (integrity). Upgrades to dims+sample-hash decode
+        // without changing the case set when the decoder lands.
+        return VerifyIntegrity(deliveredBytes);
+    case VerificationClass::Integrity:
+    case VerificationClass::CudaRaw:
+    default:
+        return VerifyIntegrity(deliveredBytes);
+    }
+}
+
 void RunFilePathDeliveryCase(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
@@ -980,8 +1026,13 @@ void RunFilePathDeliveryCase(
     const std::string& description,
     const std::string& transport,
     bool expectSuccess,
-    bool useNamedRouteDisk = false)
+    bool useNamedRouteDisk = false,
+    const DeliveryTypeContract* contractPtr = nullptr)
 {
+    // Default to the file_path contract (the historical behavior) when none given.
+    static const DeliveryTypeContract kFilePathContract{
+        "file_path", "STRING", "file_path", "", false, VerificationClass::ByteExact};
+    const DeliveryTypeContract& contract = contractPtr ? *contractPtr : kFilePathContract;
     CaseRecord rec;
     rec.caseId = caseId;
     rec.title = title;
@@ -993,7 +1044,7 @@ void RunFilePathDeliveryCase(
     const std::vector<std::string> clientReachable =
         ClientReachableTransports(options.phase, useNamedRouteDisk, options, deployment);
     notch_comfy::OutputTransportOptions selectionOptions;
-    selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"disk", "http"};
+    selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(contract);
     selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
     selectionOptions.m_clientReachableTransports = clientReachable;
     selectionOptions.m_requiredTransport = transport;
@@ -1024,18 +1075,27 @@ void RunFilePathDeliveryCase(
         return;
     }
 
-    const std::string sourcePath = DefaultSourceFilePath(options);
+    // load3d_camera is injected as an inline JSON value (no fixture file); every
+    // other type has a source file: file_path uses it as a server-staged path,
+    // the rest upload its bytes by multipart.
+    const bool inlineInput = contract.outputType == "load3d_camera";
+    std::string sourcePath;
     std::vector<uint8_t> sourceBytes;
-    std::string fileError;
-    if (sourcePath.empty() || !ReadBinaryFile(sourcePath, sourceBytes, fileError))
+    if (!inlineInput)
     {
-        rec.expectedJson = "{\"fixture\":\"source_file_readable\"}";
-        rec.actualJson = "{\"source_path\":" + CaseLogger::Quote(sourcePath) +
-                         ",\"error\":" + CaseLogger::Quote(fileError) + "}";
-        rec.result = "error";
-        rec.errors.push_back("harness_error");
-        recorder.Record(rec);
-        return;
+        sourcePath = !contract.fixtureFile.empty() ? JoinPath(options.assetRoot, contract.fixtureFile)
+                                                   : DefaultSourceFilePath(options);
+        std::string fileError;
+        if (sourcePath.empty() || !ReadBinaryFile(sourcePath, sourceBytes, fileError))
+        {
+            rec.expectedJson = "{\"fixture\":\"source_file_readable\"}";
+            rec.actualJson = "{\"source_path\":" + CaseLogger::Quote(sourcePath) +
+                             ",\"error\":" + CaseLogger::Quote(fileError) + "}";
+            rec.result = "error";
+            rec.errors.push_back("harness_error");
+            recorder.Record(rec);
+            return;
+        }
     }
 
     if (!choice.m_ok)
@@ -1051,17 +1111,32 @@ void RunFilePathDeliveryCase(
     }
 
     const std::string consumerId = caseId;
-    const std::string workflowJson = BuildRoundTripWorkflowJson("STRING", "file_path");
+    const std::string workflowJson = BuildRoundTripWorkflowJson(contract.inputType, contract.slotName);
     notch_comfy::WorkflowSubmissionRequest req;
     req.m_workflowJson = workflowJson;
     req.m_clientId = options.clientId;
     req.m_consumerId = consumerId;
     req.m_execute = true;
     req.m_broadcastWs = true;
-    req.m_inputs.push_back(notch_comfy::InputValue::String("test_input", sourcePath, "STRING"));
+    // Input transport per the contract: file_path passes a server-staged path
+    // string; load3d_camera passes an inline JSON dict; every other type uploads
+    // the fixture bytes by multipart so the bytes really travel client->server.
+    if (contract.outputType == "file_path")
+    {
+        req.m_inputs.push_back(notch_comfy::InputValue::String("test_input", sourcePath, contract.inputType));
+    }
+    else if (inlineInput)
+    {
+        req.m_inputs.push_back(notch_comfy::InputValue::Json("test_input", kCameraInlineJson, contract.inputType));
+    }
+    else
+    {
+        const std::string uploadName = contract.fixtureFile.empty() ? "input.bin" : contract.fixtureFile;
+        req.m_inputs.push_back(notch_comfy::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
+    }
     req.m_output.m_transport = TransportKindFromName(transport);
-    req.m_output.m_type = "file_path";
-    req.m_output.m_extension = ExtensionFromPath(sourcePath);
+    req.m_output.m_type = contract.outputType;
+    req.m_output.m_extension = OutputExtensionForType(contract.outputType, sourcePath);
     if (transport == "disk")
     {
         if (useNamedRouteDisk)
@@ -1175,9 +1250,14 @@ void RunFilePathDeliveryCase(
         }
     }
 
-    const std::string inputHash = Sha256Bytes(sourceBytes);
+    const std::string inputHash = sourceBytes.empty() ? "" : Sha256Bytes(sourceBytes);
     const std::string outputHash = outputRead ? Sha256Bytes(outputBytes) : "";
-    const bool hashMatch = outputRead && inputHash == outputHash;
+    // Verify the delivered artifact by the type's verification class (byte-exact
+    // for file_path, structural for file_3d/camera, integrity for audio/video/mesh,
+    // decoded-as-integrity for image until stb lands). A clean output read is a
+    // precondition; the verifier decides the match.
+    const VerifyResult verify = outputRead ? RunVerifier(contract, sourceBytes, outputBytes) : VerifyResult{};
+    const bool verifyOk = outputRead && verify.ok;
     const bool namedRouteHandoffOk = !useNamedRouteDisk ||
         (state.outputReady && state.output.m_namedRouteId == options.namedRouteId &&
          IsSafeRelativePath(state.output.m_relativePath) && state.output.m_path.empty());
@@ -1215,7 +1295,7 @@ void RunFilePathDeliveryCase(
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
     const bool ok = state.queued && state.terminalSuccess && state.outputReady &&
-                    namedRouteHandoffOk && hashMatch;
+                    namedRouteHandoffOk && verifyOk;
     if (!state.queued)
     {
         rec.errors.push_back("unexpected_reject");
@@ -1236,33 +1316,36 @@ void RunFilePathDeliveryCase(
     {
         rec.errors.push_back("named_route_handoff_mismatch");
     }
-    if (outputRead && !hashMatch)
+    if (outputRead && !verify.ok && !verify.error.empty())
     {
-        rec.errors.push_back("output_hash_mismatch");
+        rec.errors.push_back(verify.error);
     }
 
     std::ostringstream hashes;
-    hashes << "{\"inputs\":[{\"name\":\"test_input\",\"type\":\"STRING\",\"path\":"
-           << CaseLogger::Quote(sourcePath) << ",\"bytes\":" << sourceBytes.size()
+    hashes << "{\"inputs\":[{\"name\":\"test_input\",\"type\":" << CaseLogger::Quote(contract.inputType)
+           << ",\"path\":" << CaseLogger::Quote(sourcePath) << ",\"bytes\":" << sourceBytes.size()
            << ",\"sha256\":" << CaseLogger::Quote(inputHash) << "}],"
            << "\"outputs\":[{\"name\":" << CaseLogger::Quote(consumerId)
            << ",\"transport\":" << CaseLogger::Quote(transport)
+           << ",\"output_type\":" << CaseLogger::Quote(contract.outputType)
            << ",\"path\":" << CaseLogger::Quote(outputPath)
            << ",\"named_route_id\":" << CaseLogger::Quote(state.output.m_namedRouteId)
            << ",\"relative_path\":" << CaseLogger::Quote(state.output.m_relativePath)
            << ",\"bytes\":" << outputBytes.size()
            << ",\"sha256\":" << CaseLogger::Quote(outputHash)
-           << ",\"comparison\":\"exact_file_copy\"}]}";
+           << ",\"verification\":" << (verify.detail.empty() ? "null" : verify.detail) << "}]}";
 
     std::ostringstream actual;
     actual << "{\"selected_transport\":" << CaseLogger::Quote(choice.m_transport)
+           << ",\"output_type\":" << CaseLogger::Quote(contract.outputType)
            << ",\"queued\":" << CaseLogger::Bool(state.queued)
            << ",\"prompt_id\":" << CaseLogger::Quote(state.promptId)
            << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
            << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
            << ",\"named_route_handoff_ok\":" << CaseLogger::Bool(namedRouteHandoffOk)
-           << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
+           << ",\"verify_ok\":" << CaseLogger::Bool(verifyOk)
+           << ",\"verification\":" << (verify.detail.empty() ? "null" : verify.detail)
            << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
            << ",\"diagnostics_missing_events\":" << CaseLogger::Array(missingDiagnostics)
            << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
@@ -1276,7 +1359,7 @@ void RunFilePathDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"named_route_handoff_ok\":true,\"hash_match\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"named_route_handoff_ok\":true,\"verify_ok\":true}";
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
@@ -1875,6 +1958,137 @@ void RunNegotiationCases(
     }
 }
 
+std::string RejectAxisName(const std::string& verdict)
+{
+    if (verdict == "reject-type") return "type";
+    if (verdict == "reject-server") return "server";
+    if (verdict == "reject-client") return "client";
+    return "unknown";
+}
+
+std::string DeliveryCaseTitle(const DeliveryCaseDescriptor& d)
+{
+    if (d.verdict == "deliver")
+    {
+        return d.outputType + " output over " + d.transport + " (" + d.topology + ")";
+    }
+    return d.outputType + " over " + d.transport + " rejected by " + RejectAxisName(d.verdict) + " (" + d.topology + ")";
+}
+
+// A reject case is pure client-side negotiation: the client computes usable =
+// type-allowed n server-available n client-reachable and must refuse the
+// requested transport before any inject (no silent downgrade). This is the real
+// SelectOutputTransport with the type's actual type-allowed set.
+void RunRejectCase(
+    CaseRecorder& recorder,
+    CaseLogger& logger,
+    const MatrixOptions& options,
+    const DeliveryCaseDescriptor& descriptor,
+    const std::vector<std::string>& serverAvailable,
+    const std::vector<std::string>& clientReachable)
+{
+    notch_comfy::OutputTransportOptions selectionOptions;
+    selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(*descriptor.type);
+    selectionOptions.m_serverAvailableTransports = serverAvailable;
+    selectionOptions.m_clientReachableTransports = clientReachable;
+    selectionOptions.m_requiredTransport = descriptor.transport;
+    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+
+    const bool ok = !choice.m_ok;
+    CaseRecord rec;
+    rec.caseId = descriptor.id;
+    rec.title = DeliveryCaseTitle(descriptor);
+    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.description = "The " + descriptor.outputType + " output is not deliverable over " + descriptor.transport +
+                      " in the " + descriptor.topology + " topology (excluded by " +
+                      RejectAxisName(descriptor.verdict) +
+                      "), so the client must refuse the hard request before inject — no silent downgrade.";
+    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.requiredTransport = descriptor.transport;
+    rec.expectedJson = "{\"selected\":false,\"reject_axis\":\"" + RejectAxisName(descriptor.verdict) + "\"}";
+    rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
+    rec.result = ok ? "pass" : "fail";
+    if (!ok)
+    {
+        rec.errors.push_back("unexpected_accept");
+    }
+    const int index = recorder.Record(rec);
+    std::ostringstream negotiation;
+    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
+                << ",\"server_available\":" << CaseLogger::Array(serverAvailable)
+                << ",\"client_reachable\":" << CaseLogger::Array(clientReachable)
+                << ",\"required_transport\":" << CaseLogger::Quote(descriptor.transport)
+                << ",\"choice\":" << ChoiceJson(choice) << "}";
+    logger.AppendCaseFile(index, descriptor.id, "negotiation.json", CaseLogger::PrettyPrint(negotiation.str()) + "\n");
+}
+
+// Emit a self-clearing skip for a generated case (used when a whole topology is
+// capability-gated off, e.g. remote-route-disk before the server advertises the
+// named route).
+void RunSkipCase(
+    CaseRecorder& recorder,
+    const MatrixOptions& options,
+    const DeliveryCaseDescriptor& descriptor,
+    const std::string& reason)
+{
+    CaseRecord rec;
+    rec.caseId = descriptor.id;
+    rec.title = DeliveryCaseTitle(descriptor);
+    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.description = "Skipped: " + reason + ". The case is generated and tracked; it self-clears when the capability is present.";
+    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.requiredTransport = descriptor.transport;
+    rec.actualJson = "{\"reason\":" + CaseLogger::Quote(reason) + "}";
+    rec.result = "skip";
+    rec.errors.push_back(reason);
+    recorder.Record(rec);
+}
+
+// Run every generated case for one topology: deliver cases execute a real round
+// trip (cuda via the share reader, disk/http via the typed artifact runner);
+// reject cases assert client-side refusal. When skipReason is set the whole
+// topology is emitted as self-clearing skips instead.
+void RunTopologyCases(
+    CaseRecorder& recorder,
+    notch_comfy::IHttpTransport& http,
+    IWebSocketProbe& ws,
+    CaseLogger& logger,
+    const MatrixOptions& options,
+    const notch_comfy::ServerDeploymentFacts& deployment,
+    ICudaShareReader* cudaReader,
+    const TopologyConfig& topology,
+    bool useNamedRouteDisk,
+    const std::string& skipReason)
+{
+    for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
+    {
+        if (!skipReason.empty())
+        {
+            RunSkipCase(recorder, options, descriptor, skipReason);
+            continue;
+        }
+        if (descriptor.verdict != "deliver")
+        {
+            RunRejectCase(recorder, logger, options, descriptor, topology.serverAvailable, topology.clientReachable);
+            continue;
+        }
+        if (descriptor.transport == "cuda")
+        {
+            RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment, cudaReader, descriptor.id,
+                                DeliveryCaseTitle(descriptor),
+                                "Inject an image, execute, deliver over CUDA, and verify the share contract and "
+                                "(where IPC is supported) the imported bytes.",
+                                true);
+            continue;
+        }
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment, descriptor.id,
+                                DeliveryCaseTitle(descriptor),
+                                "Inject the " + descriptor.outputType + " input, execute, deliver over " +
+                                    descriptor.transport + ", retrieve the artifact, and verify it by its class.",
+                                descriptor.transport, true, useNamedRouteDisk, descriptor.type);
+    }
+}
+
 void RunDeliveryCases(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
@@ -1884,56 +2098,28 @@ void RunDeliveryCases(
     const notch_comfy::ServerDeploymentFacts& deployment,
     ICudaShareReader* cudaReader)
 {
+    const std::vector<std::string> server = DeliveryServerTransports(deployment);
+
     if (options.phase == Phase::DeliveryLocal)
     {
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
-            "local-file-path-disk",
-            "Local file path output over disk preserves bytes",
-            "Inject a deterministic file path through NotchSingleInput, execute, receive notch-output-ready with a disk path, read the artifact locally, and compare SHA-256 with the source file.",
-            "disk",
-            true);
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
-            "local-file-path-http",
-            "Local file path output over HTTP preserves bytes",
-            "Inject a deterministic file path through NotchSingleInput, execute, receive notch-output-ready with an HTTP artifact URL, fetch it, and compare SHA-256 with the source file.",
-            "http",
-            true);
-        RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment,
-            cudaReader,
-            "local-image-cuda",
-            "Local image output over CUDA publishes a valid share",
-            "Inject an image path through NotchSingleInput, execute, require CUDA output, and verify the CUDA share-status/diagnostics path when the server advertises CUDA.",
-            true);
+        // local: client and server share host (cuda + disk + http reachable).
+        const TopologyConfig local{"local", server, std::vector<std::string>{"cuda", "disk", "http"}};
+        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, local, false, "");
         return;
     }
 
     if (options.phase == Phase::DeliveryRemote)
     {
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
-            "remote-file-path-http",
-            "Remote file path output over HTTP preserves bytes",
-            "From a separate client container, inject a deterministic file path, execute on the server container, receive a URL, fetch bytes over HTTP, and compare SHA-256 with the source file.",
-            "http",
-            true);
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
-            "remote-file-path-disk-rejected",
-            "Remote file path output rejects unreachable disk transport",
-            "The remote client exposes only HTTP reachability, so a hard disk request must be rejected by client-side transport selection before inject; no silent downgrade is allowed.",
-            "disk",
-            false);
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
-            "remote-file-path-named-route-disk",
-            "Remote file path output over named-route disk preserves bytes",
-            "From a separate client container, require disk output through a configured named route, receive named_route_id plus relative_path, resolve that relative path under the client route root, and compare SHA-256 with the source file.",
-            "disk",
-            true,
-            true);
-        RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment,
-            cudaReader,
-            "remote-image-cuda-rejected",
-            "Remote image output rejects host-local CUDA transport",
-            "The remote client exposes only HTTP reachability, so a hard CUDA request must be rejected by client-side transport selection before inject.",
-            false);
+        // remote-http: two containers, network only — the client reaches http only.
+        const TopologyConfig remoteHttp{"remote-http", server, std::vector<std::string>{"http"}};
+        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, remoteHttp, false, "");
+
+        // remote-route-disk: a shared named-route volume adds disk reachability.
+        // Self-clearing skip until the server advertises the route id in /features.
+        const TopologyConfig routeDisk{"remote-route-disk", server, std::vector<std::string>{"disk", "http"}};
+        const std::string routeSkip =
+            NamedRouteConfiguredForClient(options, deployment) ? "" : "named_route_unsupported";
+        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, routeDisk, true, routeSkip);
     }
 }
 
