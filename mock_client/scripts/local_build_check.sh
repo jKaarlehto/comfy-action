@@ -43,7 +43,9 @@ rm -rf "$tmp/stub-out"
 
 echo "== verifier self-test =="
 g++ "${common[@]}" \
-  "$mock_root/tests/verify_check.cpp" "$mock_root/src/verify/verify_byte_exact.cpp" \
+  "$mock_root/tests/verify_check.cpp" \
+  "$mock_root/src/verify/verify_byte_exact.cpp" "$mock_root/src/verify/verify_integrity.cpp" \
+  "$mock_root/src/verify/verify_structural.cpp" \
   "$mock_root/src/case_logger.cpp" "$mock_root/src/hash_utils.cpp" \
   "$iface/src/client_interface.cpp" "$iface/third_party/jsonxx/jsonxx.cc" -o "$tmp/verify_check"
 "$tmp/verify_check"

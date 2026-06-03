@@ -46,6 +46,8 @@ add_library(notch_mock_matrix STATIC
     src/hash_utils.cpp
     src/delivery_types.cpp
     src/verify/verify_byte_exact.cpp
+    src/verify/verify_integrity.cpp
+    src/verify/verify_structural.cpp
 )
 target_include_directories(notch_mock_matrix PUBLIC src)
 target_link_libraries(notch_mock_matrix PUBLIC notch_comfy_client)
