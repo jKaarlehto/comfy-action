@@ -123,8 +123,8 @@ int main()
     std::printf("stub conformance: pass=%d fail=%d skip=%d error=%d\n",
                 summary.passed, summary.failed, summary.skipped, summary.errored);
 
-    // negotiation: 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 3 soft + 1 ws = 19.
-    if (!summary.Ok() || summary.passed != 19 || summary.failed != 0)
+    // negotiation: 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 4 soft + 1 ws = 20.
+    if (!summary.Ok() || summary.passed != 20 || summary.failed != 0)
     {
         std::printf("stub conformance self-test FAILED\n");
         return 1;

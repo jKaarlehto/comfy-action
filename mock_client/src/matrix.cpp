@@ -143,6 +143,9 @@ const SelectionRow kSoftRows[] = {
     {"soft-debug-mask-forces-disk", "Debug mode: client masks cuda+http from its capabilities — disk chosen",
      "To trace a dataflow over an easily-inspectable transport, the client masks cuda and http from its own reachable set, leaving disk the only usable transport. Confirms a client can narrow its capabilities to force a transport.",
      "cuda,disk,http", "cuda,disk,http", "disk", "cuda,http,disk", true, "disk"},
+    {"soft-fallback-when-no-order-match", "Soft preference lists only unusable transports — fall back to first usable",
+     "Branch (c): no element of the preference order is usable, so the helper falls back to the first usable transport. Order is cuda only; usable is disk,http (non-image, no GPU on the client side) — cuda is not usable, so the fallback returns the first usable transport (disk).",
+     "disk,http", "disk,http", "disk,http", "cuda", true, "disk"},
 };
 
 const char* const kSpecHard = "notch_conformance_spec.md §4 hard selection (A1 n A2 n A3, hard request)";
