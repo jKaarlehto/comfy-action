@@ -153,13 +153,19 @@ rejects `cuda-by-T(1) + cuda-by-S(1) + cuda-by-C(1) + disk-by-C(1) + empty(1) = 
 The cuda reject is isolated to one axis per row, so **S**-unavailable (no GPU)
 and **C**-unreachable (remote) are distinct cases.
 
-### Layer 2 — Delivery Round-Trip = 6
+### Layer 2 — Delivery Round-Trip = 7 enumerated (6 active, 1 capability-skipped)
+
+7 enumerated cases: 3 local + 1 remote HTTP + 1 remote named-route disk + 2
+remote rejects. Six are active today; the **named-route disk** case is emitted but
+records `skip` (reason `named_route_unsupported`) until the extension advertises
+`extension.notch.named_route_disk`, then it activates with no harness change.
 
 | Component | Count | Derivation |
 |---|---|---|
 | `delivery_local` positives | 3 | non-image file artifact over `disk` and `http` with exact SHA-256 byte comparison; image over `cuda` with deterministic raw-buffer input and CUDA shared-buffer SHA-256 when CUDA + the reader are available |
-| `delivery_remote` positive | 1 | remote client fetches a server-owned HTTP artifact and verifies exact SHA-256 |
-| `delivery_remote` reachability rejects | 2 | hard `disk` reject (no shared filesystem) + hard `cuda` reject (CUDA IPC is host-local), both rejected by the same set-intersection selection helper before inject |
+| `delivery_remote` HTTP positive | 1 | remote client fetches a server-owned HTTP artifact and verifies exact SHA-256 |
+| `delivery_remote` named-route disk positive | 1 | NAS-style shared-mount delivery: a Docker named volume is mounted at *different* paths in the server and client containers; the client declares a named route (`route_id → client_root`) matching the server's (`route_id → server_root`); the request carries `{route_id, relative_path}` (never an absolute path); the client reads the delivered file from its own mount and verifies exact SHA-256. **Blocked on extension work** — see note below. |
+| `delivery_remote` reachability rejects | 2 | hard `disk` reject when **no** named route / shared mount is configured (no shared filesystem) + hard `cuda` reject (CUDA IPC is host-local), both rejected by the same set-intersection selection helper before inject |
 
 Layer 2 proves the **transports actually deliver** and that the gate/negatives
 hold at runtime. It is a real round-trip:
@@ -184,9 +190,42 @@ Topology is part of delivery, not selection:
   ComfyUI share one filesystem and can use host-local CUDA IPC. It tests disk,
   HTTP, and CUDA here.
 - **delivery-remote** runs as two Docker containers on a private Docker network.
-  There is no shared output filesystem. It tests HTTP as the positive remote
-  transport and verifies hard `disk`/`cuda` requests are rejected by
-  reachability, with no downgrade.
+  By default there is **no shared output filesystem**, so HTTP is the positive
+  remote transport and hard `disk`/`cuda` requests are rejected by reachability
+  (no downgrade). A second sub-topology adds a **shared Docker named volume** to
+  model the NAS / shared-mount case: the volume is mounted at a *different* path
+  in each container (e.g. `/srv/out` on the server, `/mnt/notch` on the client),
+  so an absolute path would be wrong on the other end. This is the **named-route
+  disk** contract (`features.md` §"The transports" → `disk (remote NAS, niche)`):
+  the admin declares `route_id → server_root` on the server and `route_id →
+  client_root` on the client, and the request carries `{route_id,
+  relative_path}`. The route config *is* the agreement — no probe, no lease
+  token — and the transactional write (`.tmp` → atomic rename) plus the client's
+  read+hash turns a misconfiguration into a visible failure, not a half-read
+  file. This proves remote `disk` delivery works **when** a named route + shared
+  mount exist, complementing the no-mount reject above.
+
+  **Status — blocked on extension work (contract-ahead-of-extension).** Named
+  routes are **not implemented in ComfyUI-Notch yet**: `features.md` lists
+  "Named-route remote disk" as unchecked (`- [ ]`, "NAS niche only, deferred
+  until needed"), and there is no `route_id`/`relative_path` config or resolver
+  in the source today (`disk` output currently writes the server's own output
+  dir). So this case cannot run until the extension adds: (1) accepting
+  `{route_id, relative_path}` in `config.output.disk` (instead of/in addition to
+  an absolute path), (2) an admin server-root map keyed by `route_id`, and (3)
+  publishing/declaring the route so the client can map `route_id → client_root`.
+  **The named-route positive is a real, enumerated case that skips by capability
+  detection** — not a placeholder and not omitted. The harness always emits the
+  case; it records `skip` with reason `named_route_unsupported` until the server
+  advertises support, and runs the full delivery+byte-verify assertion once it
+  does. Detection is a `/features` capability flag the extension publishes when
+  the feature lands — `extension.notch.named_route_disk: true` — mirroring how the
+  cuda cases gate on `cuda_device_index ≥ 0`. This makes the skip **self-clearing**
+  (the case activates with zero harness changes the moment the extension ships the
+  flag) and gives the extension a concrete "done" signal to implement. Until then
+  the case is a visible, tracked obligation in `INDEX.md`/annotations
+  (`named-route-disk — SKIP`), never a silent gap. The no-shared-mount reject and
+  the HTTP positive are buildable now and do not depend on this.
 
 Both delivery jobs depend on `extension-boot` and `protocol-negotiation`. They
 must not depend on a separate run-lifecycle prerequisite check. Successful
@@ -200,9 +239,11 @@ embedding, manifest embedding, previews, etc.) — those are out of scope per
 ### Totals (exact)
 
 ```
-implemented Layer 1        = 19
-implemented Layer 2        = 6
-full conformance           = 25
+enumerated Layer 1         = 19  (all active)
+enumerated Layer 2         = 7   (3 local + 1 remote http + 1 named-route disk + 2 rejects)
+  active Layer 2           = 6
+  capability-skipped       = 1   (named-route disk, until extension advertises support)
+full conformance           = 26 enumerated (25 active today, 1 skipping)
 ```
 
 ## 5. Growth rules — how the count changes when behavior grows
@@ -301,7 +342,9 @@ also records its negotiation inputs and choice.
 Do not add a permanent standalone execution job. Delivery owns execution
 lifecycle assertions.
 
-Total implemented live count today: **25**.
+Total enumerated cases: **26** — **25 active today**, plus the named-route disk
+case which is emitted but capability-skipped (reason `named_route_unsupported`)
+until the extension advertises `extension.notch.named_route_disk`.
 
 ## 9. Delivery Diagnostics — WS assertions and per-case Notch diagnostics
 
