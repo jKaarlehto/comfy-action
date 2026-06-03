@@ -1218,7 +1218,11 @@ void RunCudaDeliveryCase(
     {
         WaitForDeliveryEvents(ws, state.promptId, consumerId, "cuda", options.executeTimeoutMs, state);
     }
-    ws.Close();
+    // NOTE: keep the WebSocket OPEN through the share-info GET and the IPC import.
+    // The server releases a client's CUDA output allocation on /ws disconnect
+    // (api/websocket.py _handle_ws_disconnect), so closing here would free the
+    // device allocation and make both the info endpoint 404 and the IPC handle
+    // stale (CUDA_ERROR_INVALID_HANDLE). Close only after the bytes are read.
 
     notch_comfy::HttpRequest infoRequest;
     infoRequest.m_method = "GET";
@@ -1238,6 +1242,7 @@ void RunCudaDeliveryCase(
     std::vector<uint8_t> cudaBytes;
     std::string cudaReadError;
     const bool cudaRead = state.cudaStatus && cudaReader->ReadShare(state.cudaShare, cudaBytes, cudaReadError);
+    ws.Close();  // allocation no longer needed; safe to disconnect (releases the share)
     const std::string outputHash = cudaRead ? Sha256Bytes(cudaBytes) : "";
     const bool hashMatch = cudaRead && outputHash == expectedOutputHash;
     const bool shapeOk = state.cudaStatus && state.cudaShare.m_width == width && state.cudaShare.m_height == height &&
