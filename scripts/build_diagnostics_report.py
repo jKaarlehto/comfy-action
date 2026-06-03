@@ -126,15 +126,60 @@ def _normalize_cases(job_dir: Path) -> list[dict]:
                 "errors": rec.get("errors", []),
                 "expected": rec.get("expected"),
                 "actual": rec.get("actual"),
+                "diagnostics": _summarize_case_diagnostics(evidence.get("notch_diagnostics")),
                 "evidence": evidence,
             }
         )
     return cases
 
 
+def _summarize_case_diagnostics(diag: object) -> dict | None:
+    """Structure a case's NOTCH_CI diagnostics (GET /notch/diagnostics) into an
+    ordered event breadcrumb plus a warning list, so the report can render a
+    per-case diagnostics panel instead of a raw blob.
+
+    Records are {kind:"event"|"log", event/name, data, message, severity}. Events
+    are CI decision breadcrumbs; logs are WARNING+ context. Both are evidence, not
+    a verdict (spec §9b).
+    """
+    if not isinstance(diag, dict):
+        return None
+    records = diag.get("records")
+    if not isinstance(records, list):
+        return None
+    events: list[str] = []
+    warnings: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        kind = str(record.get("kind", ""))
+        if kind == "event":
+            name = str(record.get("event") or record.get("name") or "")
+            if name:
+                events.append(name)
+        else:
+            warnings.append(
+                {
+                    "severity": str(record.get("severity", "") or kind or "LOG"),
+                    "message": str(record.get("message") or record.get("event") or record.get("name") or ""),
+                }
+            )
+    return {
+        "ci_enabled": bool(diag.get("ci_enabled")),
+        "count": int(diag.get("count", len(records)) or 0),
+        "events": events,
+        "warnings": warnings,
+    }
+
+
 def _normalize_diagnostics(job_dir: Path) -> list[dict]:
     diagnostics: list[dict] = []
+    # NOTCH_CI writes notch-ci.jsonl beside ComfyUI: at the job root in the local
+    # (single-container) topology, but under server/ in the remote topology where
+    # ComfyUI runs in the server container. Read whichever exists.
     ci_log = job_dir / "notch-ci.jsonl"
+    if not ci_log.is_file():
+        ci_log = job_dir / "server" / "notch-ci.jsonl"
     if not ci_log.is_file():
         return diagnostics
     for line in _read_text(ci_log).splitlines():

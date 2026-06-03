@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from build_diagnostics_report import (  # noqa: E402
+    _summarize_case_diagnostics,
     aggregate_run,
     discover_jobs,
     json_for_script,
@@ -103,6 +104,29 @@ def test_render_escapes_data_breakout():
     # a data-injected </script> or < must never appear raw inside the data block
     assert "</script>" not in match.group(1)
     assert "<img" not in match.group(1)
+
+
+def test_per_case_diagnostics_structured():
+    diag = {
+        "ci_enabled": True,
+        "count": 4,
+        "records": [
+            {"kind": "event", "event": "inject.request_parsed"},
+            {"kind": "event", "event": "output_node.delivery_done"},
+            {"kind": "log", "severity": "WARNING", "message": "cache miss for key x"},
+            {"kind": "log", "message": "no severity log"},
+        ],
+    }
+    summary = _summarize_case_diagnostics(diag)
+    assert summary["ci_enabled"] is True
+    assert summary["count"] == 4
+    assert summary["events"] == ["inject.request_parsed", "output_node.delivery_done"]
+    assert len(summary["warnings"]) == 2
+    assert summary["warnings"][0]["severity"] == "WARNING"
+    assert "cache miss" in summary["warnings"][0]["message"]
+    # non-dict / missing records -> None (no panel)
+    assert _summarize_case_diagnostics(None) is None
+    assert _summarize_case_diagnostics({"count": 0}) is None
 
 
 def test_full_build_from_fixture_root(tmp_path=None):

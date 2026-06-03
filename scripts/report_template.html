@@ -122,6 +122,24 @@ function caseCard(c) {
   ea.innerHTML = "<b>expected</b>"; const pe = el("pre", null, pretty(c.expected)); ea.appendChild(pe);
   ea.innerHTML += "<b>actual</b>"; const pa = el("pre", null, pretty(c.actual)); ea.appendChild(pa);
   body.appendChild(ea);
+  // Per-case NOTCH_CI diagnostics: the breadcrumb event trail + any WARNING logs
+  // for this prompt. Context, not a verdict (spec §9b).
+  const dg = c.diagnostics;
+  if (dg && (dg.events?.length || dg.warnings?.length)) {
+    const panel = el("details", "block");
+    panel.appendChild(el("summary", null, `NOTCH_CI diagnostics (${dg.count} records — context, not pass/fail)`));
+    if (dg.events?.length) {
+      panel.appendChild(el("div", "meta", "breadcrumb: " + dg.events.join(" → ")));
+    }
+    for (const w of (dg.warnings || [])) {
+      const row = el("div", "diag");
+      row.innerHTML = `<span class="sev ${w.severity}">${w.severity}</span>${w.message}`;
+      panel.appendChild(row);
+    }
+    panel.dataset.search = ("notch_ci diagnostics " + (dg.events||[]).join(" ") + " " +
+      (dg.warnings||[]).map(w => w.message).join(" ")).toLowerCase();
+    body.appendChild(panel);
+  }
   if (c.evidence && Object.keys(c.evidence).length) {
     const ev = el("details", "block"); ev.appendChild(el("summary", null, "evidence"));
     ev.appendChild(el("pre", null, pretty(c.evidence)));
