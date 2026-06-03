@@ -450,7 +450,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ComfyUI-Notch compatibility checks")
     parser.add_argument(
         "--mode",
-        choices=["extension_boot", "protocol_negotiation"],
+        choices=[
+            "extension_boot",
+            "protocol_negotiation",
+            "delivery_local",
+            "delivery_remote_server",
+            "delivery_remote_client",
+        ],
         default="extension_boot",
     )
     parser.add_argument("--comfyui-repository", required=True)
@@ -472,6 +478,8 @@ def parse_args() -> argparse.Namespace:
 
 CONFORMANCE_MODES = {
     "protocol_negotiation": "negotiation",
+    "delivery_local": "delivery-local",
+    "delivery_remote_client": "delivery-remote",
 }
 
 
@@ -510,6 +518,88 @@ def main() -> int:
     }
 
     try:
+        if mode == "delivery_remote_client":
+            if not (workspace / "cpp" / "notch_comfy_client" / "CMakeLists.txt").is_file():
+                raise RunnerError(f"workspace is missing cpp/notch_comfy_client: {workspace}")
+
+            base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
+            poll_url(f"{base_url}/queue", args.timeout)
+            remote_features = collect_server_features(base_url, artifacts)
+
+            try:
+                mock_exe = build_mock_client(runner, workspace, workdir)
+            except MockClientBuildError as exc:
+                result["result"] = "fail"
+                result["setup_failure_code"] = exc.code
+                result["error"] = str(exc)
+                write_json(
+                    artifacts / "transport-interface-result.json",
+                    {
+                        "schema_version": 1,
+                        "result": "fail",
+                        "setup_failure_code": exc.code,
+                        "error": str(exc),
+                        "log": "mock-client-build.log",
+                    },
+                )
+                write_json(artifacts / result_filename, result)
+                emit_annotation("error", "Mock client build", f"{exc.code}: {exc}")
+                return 1
+
+            environment = {
+                "schema_version": 1,
+                "mode": mode,
+                "platform": platform.platform(),
+                "machine": platform.machine(),
+                "extension_repository": args.extension_repository or "workspace",
+                "extension_ref": args.extension_ref,
+                "extension_commit": git_commit(runner, workspace) if (workspace / ".git").exists() else "",
+                "server_url": base_url,
+                "server_feature_flags": remote_features.get("extension", {}).get("notch", {}),
+            }
+            write_json(artifacts / "environment.json", environment)
+
+            mock_command = [
+                str(mock_exe),
+                "--base-url",
+                base_url,
+                "--output-dir",
+                str(artifacts),
+                "--client-id",
+                "notch-conformance-remote",
+                "--phase",
+                "delivery-remote",
+                "--asset-root",
+                str(workspace / "tests" / "assets" / "round_trip"),
+                "--server-log",
+                str(artifacts / "server" / "comfyui.log"),
+            ]
+            run = runner.run(mock_command, log_name="mock-client.log", check=False)
+            conformance_result: dict[str, Any] = {}
+            conformance_path = artifacts / result_filename
+            if conformance_path.is_file():
+                try:
+                    conformance_result = json.loads(conformance_path.read_text(encoding="utf-8"))
+                except Exception:
+                    conformance_result = {}
+            passed = run.returncode == 0 and conformance_result.get("result") == "pass"
+            compatibility = {
+                "schema_version": 1,
+                "profile": mode,
+                "phase": "delivery-remote",
+                "result": "pass" if passed else "fail",
+                "comfyui_ref": args.comfyui_ref,
+                "comfyui_commit": "",
+                "comfyui_notch_commit": environment["extension_commit"],
+                "runner": {"os": platform.system(), "platform": platform.platform()},
+                "checks": {"remote_server_reachable": True, "mock_client_built": True},
+                "conformance": conformance_result.get("totals", {}),
+                "environment_snapshot_sha256": file_sha256(artifacts / "environment.json"),
+            }
+            write_json(artifacts / "compatibility-result.json", compatibility)
+            annotate_conformance(artifacts, "delivery-remote")
+            return 0 if passed else 1
+
         clone_repo(runner, args.comfyui_repository, args.comfyui_ref, comfy_dir, "git.log")
         if args.extension_repository:
             clone_repo(runner, args.extension_repository, args.extension_ref, extension_source, "git.log")
@@ -532,10 +622,11 @@ def main() -> int:
         compile_cpp_client(runner, extension_dir, workdir)
         result["checks"]["cpp_client_compiles"] = True
 
-        base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
-        # Run the server with NOTCH_CI so it captures WARNING+ diagnostics (with
-        # prompt_id) for GET /notch/diagnostics, and mirror them to a JSONL
-        # artifact. Harmless when nothing warns; the matrix collects them per case.
+        connect_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+        base_url = f"{DEFAULT_COMFY_SCHEME}://{connect_host}:{args.port}"
+        # Run the server with NOTCH_CI so it captures prompt-scoped WARNING+ logs
+        # and explicit CI decision events for GET /notch/diagnostics. Mirror the
+        # same records to a JSONL artifact; the matrix collects them per case.
         server = start_comfy_server(
             python,
             comfy_dir,
@@ -587,6 +678,17 @@ def main() -> int:
             }
         )
 
+        if mode == "delivery_remote_server":
+            result["result"] = "pass"
+            write_json(artifacts / "extension-boot-result.json", result)
+            emit_annotation(
+                "notice",
+                "Remote delivery server",
+                "ComfyUI started and is waiting for the remote mock client",
+            )
+            while True:
+                time.sleep(1)
+
         if conformance_phase is not None:
             try:
                 mock_exe = build_mock_client(runner, extension_dir, workdir)
@@ -632,6 +734,15 @@ def main() -> int:
             for flag, path in fixture_flags.items():
                 if path.is_file():
                     mock_command += [flag, str(path)]
+            if conformance_phase == "delivery-local":
+                mock_command += [
+                    "--asset-root",
+                    str(extension_source / "tests" / "assets" / "round_trip"),
+                    "--server-log",
+                    str(artifacts / "comfyui.log"),
+                    "--local-output-path",
+                    "/tmp/notch-conformance-output",
+                ]
             run = runner.run(mock_command, log_name="mock-client.log", check=False)
             # The mock client owns conformance-result.json; read it back rather
             # than overwriting its per-case totals.

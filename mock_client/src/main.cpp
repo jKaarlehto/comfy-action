@@ -1,6 +1,7 @@
 // notch_mock_client: the CI consumer of cpp/notch_comfy_client. It wires the
 // IXWebSocket-backed transports into the transport-agnostic conformance
-// orchestration and runs the selected phase (negotiation, or all).
+// orchestration and runs the selected phase (negotiation, delivery-local, or
+// delivery-remote).
 
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,10 @@
 #include "matrix.h"
 #include "transports/local_http_transport.h"
 #include "transports/local_websocket_transport.h"
+
+#if defined(NOTCH_MOCK_HAS_CUDA_DRIVER)
+#include "transports/local_cuda_share_reader.h"
+#endif
 
 namespace
 {
@@ -56,25 +61,38 @@ int main(int argc, char** argv)
     const std::string parseWorkflowPath = ArgValue(argc, argv, "--parse-workflow", "");
     const std::string requiredFilesReadyPath = ArgValue(argc, argv, "--required-files-ready", "");
     const std::string requiredFilesMissingPath = ArgValue(argc, argv, "--required-files-missing", "");
-    const std::string executeWorkflowPath = ArgValue(argc, argv, "--execute-workflow", "");
-    const std::string executeMissingFilePath = ArgValue(argc, argv, "--execute-missing-file", "");
+    const std::string assetRoot = ArgValue(argc, argv, "--asset-root", "/workspace/tests/assets/round_trip");
+    const std::string sourceFilePath = ArgValue(argc, argv, "--source-file", "");
+    const std::string localOutputPath = ArgValue(argc, argv, "--local-output-path", "/tmp/notch-conformance-output");
+    const std::string serverLogPath = ArgValue(argc, argv, "--server-log", outputRoot + "/comfyui.log");
     const std::string wsUrl =
         ArgValue(argc, argv, "--ws-url", DeriveWsBase(baseUrl) + "/ws?clientId=" + clientId);
 
     notch_mock::Phase phase = notch_mock::Phase::Negotiation;
-    if (phaseArg == "all")
+    if (phaseArg == "delivery-local")
     {
-        phase = notch_mock::Phase::All;
+        phase = notch_mock::Phase::DeliveryLocal;
+    }
+    else if (phaseArg == "delivery-remote")
+    {
+        phase = notch_mock::Phase::DeliveryRemote;
     }
     else if (phaseArg != "negotiation")
     {
-        std::cerr << "unsupported --phase '" << phaseArg << "'; expected negotiation or all" << std::endl;
+        std::cerr << "unsupported --phase '" << phaseArg
+                  << "'; expected negotiation, delivery-local, or delivery-remote" << std::endl;
         return 2;
     }
 
     notch_mock::CaseLogger logger(outputRoot);
     notch_mock::LocalHttpTransport http(baseUrl, outputRoot);
     notch_mock::LocalWebSocketTransport ws(wsUrl, outputRoot);
+#if defined(NOTCH_MOCK_HAS_CUDA_DRIVER)
+    notch_mock::LocalCudaShareReader cudaReader;
+    notch_mock::ICudaShareReader* cudaReaderPtr = &cudaReader;
+#else
+    notch_mock::ICudaShareReader* cudaReaderPtr = nullptr;
+#endif
 
     notch_mock::MatrixOptions options;
     options.phase = phase;
@@ -93,16 +111,12 @@ int main(int argc, char** argv)
     {
         options.requiredFilesMissingJson = ReadFile(requiredFilesMissingPath);
     }
-    if (!executeWorkflowPath.empty())
-    {
-        options.executeWorkflowJson = ReadFile(executeWorkflowPath);
-    }
-    if (!executeMissingFilePath.empty())
-    {
-        options.executeMissingFileJson = ReadFile(executeMissingFilePath);
-    }
+    options.assetRoot = assetRoot;
+    options.sourceFilePath = sourceFilePath;
+    options.localOutputPath = localOutputPath;
+    options.serverLogPath = serverLogPath;
 
-    notch_mock::MatrixSummary summary = notch_mock::RunConformance(http, ws, options, logger);
+    notch_mock::MatrixSummary summary = notch_mock::RunConformance(http, ws, options, logger, cudaReaderPtr);
 
     std::cout << "conformance [" << phaseArg << "]: pass=" << summary.passed
               << " fail=" << summary.failed

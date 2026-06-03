@@ -3,9 +3,9 @@
 This document describes the first Notch-specific version of `comfy-action`.
 It adapts the action from "run a sample ComfyUI workflow" into a slim contract
 check for `ComfyUI-Notch`: build a Docker runner image, start a pinned ComfyUI
-version with the custom node installed, compile the C++ client interface, and
-exercise protocol negotiation with the C++ mock client. Real delivery testing is
-planned as a later local/remote-topology round-trip job.
+version with the custom node installed, compile the C++ client interface,
+exercise protocol negotiation with the C++ mock client, and run local/remote
+delivery round trips.
 
 ## Ownership Model
 
@@ -74,9 +74,9 @@ CI product:
 - The self-hosted runner is trusted infrastructure. Docker gives environment
   repeatability and cleanup, but it is not a security boundary for untrusted
   workflows.
-- `protocol_negotiation` starts with discovery and negotiation only. Real
-  delivery and CUDA IPC validation stay in the planned round-trip jobs, not in a
-  queue-only interim phase.
+- The delivery jobs are transport contract tests, not Notch output-target tests.
+  They verify byte delivery and reachability using the mock client linked
+  against the C++ client interface.
 
 ## Goals
 
@@ -88,6 +88,10 @@ CI product:
   reproduce a successful or failed run.
 - In `protocol_negotiation` mode, verify negotiation-axis positives and negatives
   with a C++ mock client linked against the vendored client interface.
+- In `delivery_local` mode, execute real workflows and verify local disk, HTTP,
+  and CUDA delivery evidence.
+- In `delivery_remote` mode, run separate server/client containers and verify
+  remote HTTP delivery plus unreachable disk/CUDA rejection.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
 ## Non-Goals
@@ -98,7 +102,7 @@ CI product:
   Node, Save to Disk, and other target choices are Notch-side output handling
   policy, not part of transport negotiation.
 - Do not emulate a remote Comfy server in `protocol_negotiation` mode. Remote
-  behavior belongs to the planned Docker Compose delivery job.
+  behavior belongs to `delivery_remote`.
 - Do not download large model sets for the extension-boot check.
 - Do not archive an entire Python environment unless a repro needs it. Prefer
   manifest artifacts.
@@ -109,7 +113,7 @@ Keep configuration small:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` runs the same setup, then runs the C++ mock client's discovery and negotiation matrix. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` runs the same setup, then the discovery and negotiation matrix. `delivery_local` runs local round trips. `delivery_remote` runs the two-container remote topology. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository to clone inside the container. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer tags or commits for compatibility records. |
 | `extension_repository` | empty | Optional ComfyUI-Notch repository. Empty means copy the caller workspace checkout. |
@@ -184,7 +188,7 @@ adapters and orchestration needed by CI:
 - HTTP requests to `/notch/parse`, `/notch/inject`, and artifact GET routes.
 - WebSocket reads for Comfy execution lifecycle, `notch-output-ready`, and
   `notch-cuda-share-status`.
-- Optional CUDA Driver IPC import for future CUDA-positive execution cases.
+- Optional CUDA Driver IPC import for CUDA-positive local delivery cases.
 - Local output validation and artifact writing for CI evidence.
 
 Keep this mock client in the action/test harness, not in
@@ -200,10 +204,10 @@ The important boundary is that the mock client is a consumer of
 3. Parse workflow contracts with `ParseWorkflowContract`.
 4. Select transports with `SelectOutputTransport`.
 5. Use `BuildWorkflowSubmissionRequest` and `ParseWorkflowSubmissionResponse`
-   when execution-mode cases are added.
+   for delivery cases.
 6. Parse WebSocket text through `ParseWebSocketEvent`,
-   `ParseCudaShareStatusEvent`, and `ParseOutputReadyEvent` when execution-mode
-   cases are added.
+   `ParseCudaShareStatusEvent`, and `ParseOutputReadyEvent` for delivery
+   evidence and verdicts.
 
 The mock client should provide small concrete transport adapters:
 
@@ -261,10 +265,9 @@ Execution Model).
 
 The runnable `protocol_negotiation` mode uses the real HTTP transport and the
 interface parsers for `/features` and `/notch/parse`. It also performs a
-WebSocket handshake case so the transport is not dead code. It does not submit
-`/notch/inject` yet. The planned delivery jobs will reuse the same transports
-for execution, output-ready events, artifact fetch, byte verification, and CUDA
-share-status validation.
+WebSocket handshake case so the transport is not dead code. The delivery modes
+reuse the same transports for execution, output-ready events, artifact fetch,
+byte verification, and CUDA share-status validation.
 
 The suite tests three negotiation axes:
 
@@ -276,14 +279,13 @@ The suite tests three negotiation axes:
 
 Beyond transport selection, the suite also exercises a **deployment-readiness
 gate** (orthogonal to the three transport axes): `POST /notch/get-required-files`
-reports each referenced input file's `exists` flag, and the intended contract is
-that a missing required file blocks the run. Server enforcement of that block is
-not yet built, so the gate is asserted ahead of the extension and a live failure
-flags the gap to fix.
+reports each referenced input file's `exists` flag, and the client-side contract
+is that a missing required file makes the run not ready. This gate is asserted
+ahead of execution; it is not multiplied into the delivery transport matrix.
 
 The canonical case set — every axis, its components, the boundary counting
-criterion, the exact counts (implemented Layer 1 = 19, planned full conformance
-= 32), the growth rules, and the spec→`mock_client` generation mapping — lives in
+criterion, the exact counts (Layer 1 = 19, Layer 2 = 6, full conformance = 25),
+the growth rules, and the spec→`mock_client` generation mapping — lives in
 `docs/notch_conformance_spec.md`. Treat that document as the source of truth
 for the matrix; the tables below are worked examples derived from it.
 
@@ -362,8 +364,8 @@ be read as permission for the server to downgrade a submitted
 `config.output.transport`.
 
 Remote server cases are out of scope for `protocol_negotiation`. They belong to
-the planned `delivery-remote` Docker Compose job because networking and
-filesystem reachability are delivery topology, not selection logic.
+`delivery_remote` because networking and filesystem reachability are delivery
+topology, not selection logic.
 
 ### Contract Matrix Execution Model
 
@@ -381,14 +383,13 @@ Use two implementation stages:
    transport-selection helper. Do not queue workflow execution yet. This
    verifies that the extension's advertised workflow/type axis, server
    deployment facts, and client reachability negotiation agree.
-2. **Delivery round-trip.** Add `/notch/inject`, WebSocket lifecycle capture,
+2. **Delivery round-trip.** Use `/notch/inject`, WebSocket lifecycle capture,
    `NotchSingleInput` fixture values, `NotchOutputNode` delivery, disk/HTTP/CUDA
-   artifact retrieval, SHA-256 plus decoded shape/type checks, and topology
-   variants. The planned jobs are `delivery-local` (single container; disk,
-   HTTP, CUDA) and `delivery-remote` (Docker Compose; HTTP, named-route disk,
-   unshared-filesystem negatives). Do not keep queue-only execution checks as a
-   prerequisite job; execution and file-availability assertions are folded into
-   delivery.
+   artifact retrieval, SHA-256 checks, and topology variants. `delivery_local`
+   is single-container disk/HTTP/CUDA. `delivery_remote` is a two-container
+   HTTP-positive plus unreachable disk/CUDA-negative topology. Do not keep a
+   standalone run-lifecycle check as a prerequisite job; delivery owns execution
+   assertions.
 
 For both phases, each case should produce a structured result object:
 
@@ -430,12 +431,15 @@ conformance/
       mock-client.jsonl
       http.jsonl
       websocket.jsonl
+      websocket-summary.json
+      notch-diagnostics.json
       server.log
       hashes.json
-      request-parse.json
-      response-parse.json
-      request-inject.json
-      response-inject.json
+      negotiation.json
+      inject-request.json
+      inject-response.json
+      output-ready.json
+      cuda-share-status.json
 ```
 
 All transcripts should be JSONL with timestamped records. Plain text may be
@@ -450,6 +454,12 @@ inspection.
 - `websocket.jsonl`: sent and received WebSocket messages, including timestamps,
   prompt ids, output-ready events, CUDA share-status messages, and terminal
   execution events.
+- `websocket-summary.json`: the prompt-matched terminal event plus the parsed
+  transport-specific Notch signal (`notch-output-ready` or
+  `notch-cuda-share-status`).
+- `notch-diagnostics.json`: `NOTCH_CI` records for the prompt. `kind: "log"`
+  records are WARNING+ context; `kind: "event"` records are CI-only decision
+  breadcrumbs from the inject/execution/output path.
 - `server.log`: the ComfyUI log slice for the case. Keep full `comfyui.log` for
   the run, but also record per-case slices by timestamp or byte offset.
 - `hashes.json`: all input and output integrity checks for the case.
@@ -502,6 +512,8 @@ Failure categories should be stable strings so reports can be grouped:
 - `output_hash_mismatch`
 - `cuda_status_missing`
 - `cuda_import_failed`
+- `ci_diagnostics_unavailable`
+- `ci_diagnostics_missing_events`
 - `deployment_readiness_mismatch`
 - `required_files_parse_error`
 - `transport_interface_incompatible`
@@ -605,8 +617,9 @@ Safe to cache or reuse:
   reused. This covers the **ComfyUI and extension `requirements.txt`** deps,
   which vary by `comfyui_ref` and so are not baked. `pip-freeze.txt` and
   `python-env.json` record the exact installed environment.
-- Optional model cache for future non-initialization tests, but not the phase-1
-  extension-boot check.
+- Optional model cache for future model-backed suites. The current four-job
+  conformance flow uses small checked-in fixtures and should not depend on a
+  mutable model cache.
 
 Do not cache:
 
@@ -619,7 +632,8 @@ Do not cache:
 - C++ build outputs as authoritative test inputs. Rebuild from source each run.
 
 Default policy: build and install from source every run; cache only Docker image
-layers unless a later phase needs package download caches.
+layers and package downloads. Do not reuse worktrees, virtual environments,
+runtime outputs, or C++ build trees as authoritative test inputs.
 
 ## Last-Known-Good Record
 

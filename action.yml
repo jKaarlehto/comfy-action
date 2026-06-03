@@ -3,7 +3,7 @@ description: "Verify the notch_comfy_client C++ interface conforms to the ComfyU
 
 inputs:
   mode:
-    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs the discovery + transport-negotiation + readiness-decision cases."
+    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs discovery + transport-negotiation + readiness. delivery_local runs local disk/http/cuda delivery. delivery_remote runs a two-container remote HTTP/reachability delivery check."
     required: false
     default: "extension_boot"
   comfyui_repository:
@@ -124,6 +124,7 @@ runs:
         }
 
     - name: "[Docker] Run Notch contract checks"
+      if: ${{ inputs.mode != 'delivery_remote' }}
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -185,6 +186,123 @@ runs:
         & docker @dockerArgs
         if ($LASTEXITCODE -ne 0) {
           exit $LASTEXITCODE
+        }
+
+    - name: "[Docker] Run remote delivery topology"
+      if: ${{ inputs.mode == 'delivery_remote' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $artifactHost = Join-Path $env:GITHUB_WORKSPACE "${{ inputs.artifact_dir }}"
+        $pipCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.pip_cache_dir }}"
+        $gpuArgs = @()
+
+        if ("${{ inputs.use_gpu }}" -eq "true") {
+          $gpuArgs = @("--gpus", "all")
+        }
+        elseif ("${{ inputs.use_gpu }}" -eq "auto") {
+          if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            & docker run --rm --gpus all --entrypoint nvidia-smi "${{ inputs.docker_image }}" *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $gpuArgs = @("--gpus", "all")
+              Write-Host "Docker GPU probe passed; running server with --gpus all."
+            }
+            else {
+              Write-Host "Docker GPU probe failed; running server without --gpus all."
+            }
+          }
+          else {
+            Write-Host "nvidia-smi not found on host; running server without --gpus all."
+          }
+        }
+        elseif ("${{ inputs.use_gpu }}" -ne "false") {
+          Write-Error "Unsupported use_gpu value: ${{ inputs.use_gpu }}"
+          exit 2
+        }
+
+        $actionPath = "${{ github.action_path }}"
+        $networkName = "notch-contract-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+        $serverName = "$networkName-server"
+        $serverArtifacts = Join-Path $artifactHost "server"
+        New-Item -ItemType Directory -Force -Path $serverArtifacts | Out-Null
+
+        & docker network create $networkName
+        if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+        }
+
+        try {
+          $serverArgs = @(
+            "run", "-d",
+            "--name", $serverName,
+            "--network", $networkName
+          ) + $gpuArgs + @(
+            "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
+            "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
+            "-e", "GITHUB_RUN_ATTEMPT=$env:GITHUB_RUN_ATTEMPT",
+            "-e", "GITHUB_REF_NAME=$env:GITHUB_REF_NAME",
+            "-v", "$($env:GITHUB_WORKSPACE):/workspace:ro",
+            "-v", "$($actionPath):/action:ro",
+            "-v", "$($artifactHost):/artifacts",
+            "-v", "$($pipCacheHost):/cache/pip",
+            "${{ inputs.docker_image }}",
+            "--mode", "delivery_remote_server",
+            "--comfyui-repository", "${{ inputs.comfyui_repository }}",
+            "--comfyui-ref", "${{ inputs.comfyui_ref }}",
+            "--extension-repository", "${{ inputs.extension_repository }}",
+            "--extension-ref", "${{ inputs.extension_ref }}",
+            "--workspace", "/workspace",
+            "--artifacts", "/artifacts/server",
+            "--host", "0.0.0.0",
+            "--port", "${{ inputs.port }}",
+            "--timeout", "${{ inputs.timeout }}",
+            "--comfyui-flags=${{ inputs.comfyui_flags }}",
+            "--torch-index-url", "${{ inputs.torch_index_url }}",
+            "--install-torch", "${{ inputs.install_torch }}",
+            "--expected-node-classes", "${{ inputs.expected_node_classes }}"
+          )
+          & docker @serverArgs
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $clientArgs = @(
+            "run", "--rm",
+            "--network", $networkName,
+            "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
+            "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
+            "-e", "GITHUB_RUN_ATTEMPT=$env:GITHUB_RUN_ATTEMPT",
+            "-e", "GITHUB_REF_NAME=$env:GITHUB_REF_NAME",
+            "-v", "$($env:GITHUB_WORKSPACE):/workspace:ro",
+            "-v", "$($actionPath):/action:ro",
+            "-v", "$($artifactHost):/artifacts",
+            "-v", "$($pipCacheHost):/cache/pip",
+            "${{ inputs.docker_image }}",
+            "--mode", "delivery_remote_client",
+            "--comfyui-repository", "${{ inputs.comfyui_repository }}",
+            "--comfyui-ref", "${{ inputs.comfyui_ref }}",
+            "--extension-repository", "${{ inputs.extension_repository }}",
+            "--extension-ref", "${{ inputs.extension_ref }}",
+            "--workspace", "/workspace",
+            "--artifacts", "/artifacts",
+            "--host", $serverName,
+            "--port", "${{ inputs.port }}",
+            "--timeout", "${{ inputs.timeout }}",
+            "--comfyui-flags=${{ inputs.comfyui_flags }}",
+            "--torch-index-url", "${{ inputs.torch_index_url }}",
+            "--install-torch", "${{ inputs.install_torch }}",
+            "--expected-node-classes", "${{ inputs.expected_node_classes }}"
+          )
+          & docker @clientArgs
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+        }
+        finally {
+          $serverLog = Join-Path $serverArtifacts "docker-server.log"
+          & docker logs $serverName *> $serverLog
+          & docker rm -f $serverName *> $null
+          & docker network rm $networkName *> $null
         }
 
     - name: "[Docker] Upload contract artifacts"

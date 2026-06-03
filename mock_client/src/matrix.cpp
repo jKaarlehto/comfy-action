@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <thread>
+
+#include "hash_utils.h"
 
 namespace notch_mock
 {
@@ -147,8 +150,8 @@ const char* const kSpecSoft = "notch_conformance_spec.md §4 soft selection (A4 
 const char* const kSpecTypeAxis = "notch_conformance_spec.md §4 type-axis discovery (A1)";
 const char* const kSpecReadiness = "notch_conformance_spec.md §4 deployment-readiness decision (A5)";
 const char* const kSpecLiveness = "notch_conformance_spec.md §4 setup/liveness (A0)";
-const char* const kSpecExecution = "notch_conformance_spec.md §9a queue execution (WS terminal event)";
-const char* const kSpecFileAvailability = "notch_conformance_spec.md §9 file-availability enforcement (A5 runtime)";
+const char* const kSpecDeliveryLocal = "notch_conformance_spec.md §4 Layer 2 delivery-local";
+const char* const kSpecDeliveryRemote = "notch_conformance_spec.md §4 Layer 2 delivery-remote";
 
 } // namespace
 
@@ -235,10 +238,9 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
 // Deployment-readiness decision (Layer 1, no execution): POST
 // /notch/get-required-files and compute the *client-side* decision — any
 // required file with exists=false ⇒ not-ready ⇒ the client would block the run.
-// This verifies the readiness decision only; the matching server-side run-block
-// enforcement is a Layer-2 assertion (not yet built server-side). The facts are
-// server-published deployment state; the decision is user-actionable, not
-// auto-negotiated, and is orthogonal to transport selection.
+// This verifies the readiness decision only. The facts are server-published
+// deployment state; the decision is user-actionable, not auto-negotiated, and is
+// orthogonal to transport selection.
 void RunReadinessCase(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
@@ -323,52 +325,585 @@ std::string ReadFileSlice(const std::string& path, long start, long end)
     return buffer;
 }
 
-// Queue-execution/file-availability case: submit a workflow with execute=true, wait for the matching
-// terminal WS event by prompt_id, and assert the run outcome. For expectSuccess
-// the run must reach execution_success; otherwise (file-availability enforcement)
-// the run must be blocked — rejected at inject (not queued) or terminated with
-// execution_error/interrupted — and must NOT succeed. Writes per-case evidence:
-// the websocket frames, the server.log slice for the run, and the Notch
-// diagnostics captured under this prompt_id.
-void RunExecutionCase(
+bool ContainsTransport(const std::vector<std::string>& values, const std::string& target)
+{
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        if (values[i] == target)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> DeliveryServerTransports(const notch_comfy::ServerDeploymentFacts& deployment)
+{
+    std::vector<std::string> transports;
+    for (size_t i = 0; i < deployment.m_outputTransports.size(); ++i)
+    {
+        const std::string transport = deployment.m_outputTransports[i];
+        if (transport == "disk" || transport == "http" || transport == "cuda")
+        {
+            transports.push_back(transport);
+        }
+    }
+    std::sort(transports.begin(), transports.end());
+    transports.erase(std::unique(transports.begin(), transports.end()), transports.end());
+    return transports;
+}
+
+std::vector<std::string> ClientReachableTransports(Phase phase)
+{
+    if (phase == Phase::DeliveryRemote)
+    {
+        return std::vector<std::string>{"http"};
+    }
+    return std::vector<std::string>{"cuda", "disk", "http"};
+}
+
+std::string ExtensionFromPath(const std::string& path)
+{
+    const size_t slash = path.find_last_of("/\\");
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+    {
+        return "bin";
+    }
+    return path.substr(dot + 1U);
+}
+
+std::string DefaultSourceFilePath(const MatrixOptions& options)
+{
+    if (!options.sourceFilePath.empty())
+    {
+        return options.sourceFilePath;
+    }
+    if (!options.assetRoot.empty())
+    {
+        return options.assetRoot + "/mesh.glb";
+    }
+    return "";
+}
+
+std::string DefaultLocalOutputPath(const MatrixOptions& options)
+{
+    if (!options.localOutputPath.empty())
+    {
+        return options.localOutputPath;
+    }
+    return "/tmp/notch-conformance-output";
+}
+
+std::string ServerLogPath(const MatrixOptions& options)
+{
+    if (!options.serverLogPath.empty())
+    {
+        return options.serverLogPath;
+    }
+    return options.outputRoot + "/comfyui.log";
+}
+
+std::string BuildRoundTripWorkflowJson(const std::string& inputType, const std::string& slotName)
+{
+    std::ostringstream json;
+    json << "{"
+         << "\"1\":{\"class_type\":\"NotchSingleInput\",\"inputs\":{"
+         << "\"key\":\"test_input\",\"type\":" << CaseLogger::Quote(inputType)
+         << ",\"frontend_state\":\"\"},\"_meta\":{\"title\":\"Notch Value Loader\"}},"
+         << "\"2\":{\"class_type\":\"NotchOutputNode\",\"inputs\":{"
+         << CaseLogger::Quote(slotName) << ":[\"1\",0]"
+         << "},\"_meta\":{\"title\":\"Notch Output\"}}"
+         << "}";
+    return json.str();
+}
+
+std::vector<uint8_t> BuildFloat32RgbPattern(int width, int height)
+{
+    std::vector<uint8_t> bytes;
+    bytes.resize(static_cast<size_t>(width * height * 3 * 4));
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            const float values[3] = {
+                static_cast<float>(x) / static_cast<float>(width - 1),
+                static_cast<float>(y) / static_cast<float>(height - 1),
+                static_cast<float>((x + y) % width) / static_cast<float>(width - 1),
+            };
+            for (int c = 0; c < 3; ++c)
+            {
+                const size_t offset = static_cast<size_t>(((y * width + x) * 3 + c) * 4);
+                const uint8_t* src = reinterpret_cast<const uint8_t*>(&values[c]);
+                bytes[offset + 0U] = src[0];
+                bytes[offset + 1U] = src[1];
+                bytes[offset + 2U] = src[2];
+                bytes[offset + 3U] = src[3];
+            }
+        }
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height)
+{
+    std::vector<uint8_t> bytes;
+    bytes.resize(static_cast<size_t>(width * height * 4 * 4));
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            const float values[4] = {
+                static_cast<float>(x) / static_cast<float>(width - 1),
+                static_cast<float>(y) / static_cast<float>(height - 1),
+                static_cast<float>((x + y) % width) / static_cast<float>(width - 1),
+                1.0f,
+            };
+            for (int c = 0; c < 4; ++c)
+            {
+                const size_t offset = static_cast<size_t>(((y * width + x) * 4 + c) * 4);
+                const uint8_t* src = reinterpret_cast<const uint8_t*>(&values[c]);
+                bytes[offset + 0U] = src[0];
+                bytes[offset + 1U] = src[1];
+                bytes[offset + 2U] = src[2];
+                bytes[offset + 3U] = src[3];
+            }
+        }
+    }
+    return bytes;
+}
+
+notch_comfy::OutputTransportKind TransportKindFromName(const std::string& transport)
+{
+    if (transport == "disk")
+    {
+        return notch_comfy::OutputTransportDisk;
+    }
+    if (transport == "http")
+    {
+        return notch_comfy::OutputTransportHttp;
+    }
+    if (transport == "cuda")
+    {
+        return notch_comfy::OutputTransportCuda;
+    }
+    return notch_comfy::OutputTransportUnset;
+}
+
+struct DeliveryRunState
+{
+    bool queued = false;
+    std::string promptId;
+    std::string injectError;
+    std::string terminalType;
+    bool terminalSuccess = false;
+    bool outputReady = false;
+    bool cudaStatus = false;
+    notch_comfy::OutputReady output;
+    notch_comfy::CudaShareStatus cudaShare;
+    std::vector<std::string> websocketFrames;
+};
+
+bool WaitForDeliveryEvents(
+    IWebSocketProbe& ws,
+    const std::string& promptId,
+    const std::string& consumerId,
+    const std::string& transport,
+    int timeoutMs,
+    DeliveryRunState& state)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        std::vector<std::string> batch = ws.DrainReceived();
+        for (size_t i = 0; i < batch.size(); ++i)
+        {
+            state.websocketFrames.push_back(batch[i]);
+            notch_comfy::WebSocketEvent event;
+            std::string eventError;
+            if (!ClientProtocol::ParseWebSocketEvent(batch[i], event, eventError))
+            {
+                continue;
+            }
+            if (event.m_kind == notch_comfy::EventNotchOutputReady)
+            {
+                std::vector<notch_comfy::OutputReady> outputs;
+                std::string outputError;
+                if (ClientProtocol::ParseOutputReadyEvent(batch[i], outputs, outputError))
+                {
+                    for (size_t j = 0; j < outputs.size(); ++j)
+                    {
+                        if ((outputs[j].m_promptId.empty() || outputs[j].m_promptId == promptId) &&
+                            outputs[j].m_name == consumerId &&
+                            outputs[j].m_transport == transport)
+                        {
+                            state.output = outputs[j];
+                            state.outputReady = true;
+                        }
+                    }
+                }
+            }
+            if (event.m_kind == notch_comfy::EventNotchCudaShareStatus)
+            {
+                std::vector<notch_comfy::CudaShareStatus> shares;
+                std::string cudaError;
+                if (ClientProtocol::ParseCudaShareStatusEvent(batch[i], shares, cudaError))
+                {
+                    for (size_t j = 0; j < shares.size(); ++j)
+                    {
+                        if (shares[j].m_name == consumerId)
+                        {
+                            state.cudaShare = shares[j];
+                            state.cudaStatus = true;
+                        }
+                    }
+                }
+            }
+            if (!event.m_promptId.empty() && event.m_promptId != promptId)
+            {
+                continue;
+            }
+            if (event.m_kind == notch_comfy::EventExecutionSuccess)
+            {
+                state.terminalType = "execution_success";
+                state.terminalSuccess = true;
+            }
+            else if (event.m_kind == notch_comfy::EventExecutionError ||
+                     event.m_kind == notch_comfy::EventExecutionInterrupted)
+            {
+                state.terminalType = event.m_type;
+            }
+        }
+
+        if (state.terminalSuccess && (transport == "cuda" ? state.cudaStatus : state.outputReady))
+        {
+            return true;
+        }
+        if (!state.terminalType.empty() && !state.terminalSuccess)
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
+std::string WebSocketFrameLog(const std::vector<std::string>& frames)
+{
+    std::string log;
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        log += frames[i];
+        log += "\n";
+    }
+    return log;
+}
+
+std::string OutputReadyJson(const notch_comfy::OutputReady& output)
+{
+    std::ostringstream json;
+    json << "{\"name\":" << CaseLogger::Quote(output.m_name)
+         << ",\"prompt_id\":" << CaseLogger::Quote(output.m_promptId)
+         << ",\"transport\":" << CaseLogger::Quote(output.m_transport)
+         << ",\"path\":" << CaseLogger::Quote(output.m_path)
+         << ",\"url\":" << CaseLogger::Quote(output.m_url)
+         << ",\"type\":" << CaseLogger::Quote(output.m_type)
+         << ",\"format\":" << CaseLogger::Quote(output.m_format)
+         << ",\"width\":" << output.m_width
+         << ",\"height\":" << output.m_height << "}";
+    return json.str();
+}
+
+std::string CudaShareStatusJson(const notch_comfy::CudaShareStatus& share)
+{
+    std::ostringstream json;
+    json << "{\"name\":" << CaseLogger::Quote(share.m_name)
+         << ",\"width\":" << share.m_width
+         << ",\"height\":" << share.m_height
+         << ",\"channels\":" << share.m_channels
+         << ",\"pixel_format\":" << CaseLogger::Quote(share.m_pixelFormat)
+         << ",\"dtype\":" << CaseLogger::Quote(share.m_dtype)
+         << ",\"channel_order\":" << CaseLogger::Quote(share.m_channelOrder)
+         << ",\"memory_layout\":" << CaseLogger::Quote(share.m_memoryLayout)
+         << ",\"row_stride_bytes\":" << share.m_rowStrideBytes
+         << ",\"data_offset\":" << share.m_dataOffset
+         << ",\"data_size_bytes\":" << share.m_dataSizeBytes
+         << ",\"metadata_offset\":" << share.m_metadataOffset
+         << ",\"metadata_size_bytes\":" << share.m_metadataSizeBytes
+         << ",\"frame_counter_offset\":" << share.m_frameCounterOffset
+         << ",\"cuda_device_index\":" << share.m_cudaDeviceIndex
+         << ",\"notch_consumer_id\":" << CaseLogger::Quote(share.m_notchConsumerId)
+         << ",\"resource_id\":" << CaseLogger::Quote(share.m_resourceId)
+         << ",\"has_ipc_handle\":" << CaseLogger::Bool(!share.m_ipcHandleHex.empty())
+         << ",\"has_event_ipc_handle\":" << CaseLogger::Bool(!share.m_eventIpcHandleHex.empty())
+         << "}";
+    return json.str();
+}
+
+std::string WebSocketSummaryJson(const DeliveryRunState& state)
+{
+    std::ostringstream json;
+    json << "{\"prompt_id\":" << CaseLogger::Quote(state.promptId)
+         << ",\"queued\":" << CaseLogger::Bool(state.queued)
+         << ",\"terminal_type\":" << CaseLogger::Quote(state.terminalType)
+         << ",\"terminal_success\":" << CaseLogger::Bool(state.terminalSuccess)
+         << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
+         << ",\"cuda_status\":" << CaseLogger::Bool(state.cudaStatus)
+         << ",\"frame_count\":" << state.websocketFrames.size();
+    if (state.outputReady)
+    {
+        json << ",\"output\":" << OutputReadyJson(state.output);
+    }
+    if (state.cudaStatus)
+    {
+        json << ",\"cuda_share\":" << CudaShareStatusJson(state.cudaShare);
+    }
+    json << "}";
+    return json.str();
+}
+
+void AppendPromptDiagnostics(
+    int index,
+    const std::string& caseId,
+    notch_comfy::IHttpTransport& http,
+    CaseLogger& logger,
+    const std::string& promptId)
+{
+    if (promptId.empty())
+    {
+        return;
+    }
+    notch_comfy::HttpRequest diagRequest;
+    diagRequest.m_method = "GET";
+    diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
+    diagRequest.m_contentType = "application/json";
+    notch_comfy::HttpResponse diagResponse;
+    std::string diagError;
+    if (http.Send(diagRequest, diagResponse, diagError) && !diagResponse.m_body.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "notch-diagnostics.json",
+                              CaseLogger::PrettyPrint(diagResponse.m_body) + "\n");
+    }
+}
+
+bool FetchPromptDiagnostics(
+    notch_comfy::IHttpTransport& http,
+    const std::string& promptId,
+    std::string& body,
+    std::string& error)
+{
+    body.clear();
+    error.clear();
+    if (promptId.empty())
+    {
+        error = "prompt_id is empty";
+        return false;
+    }
+
+    notch_comfy::HttpRequest diagRequest;
+    diagRequest.m_method = "GET";
+    diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
+    diagRequest.m_contentType = "application/json";
+    notch_comfy::HttpResponse diagResponse;
+    std::string sendError;
+    if (!http.Send(diagRequest, diagResponse, sendError))
+    {
+        error = sendError.empty() ? "diagnostics request failed" : sendError;
+        return false;
+    }
+    body = diagResponse.m_body;
+    if (diagResponse.m_statusCode != 200)
+    {
+        error = "diagnostics endpoint returned HTTP " + std::to_string(diagResponse.m_statusCode);
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> MissingDiagnosticsEvents(
+    const std::string& diagnosticsJson,
+    const std::vector<std::string>& requiredEvents)
+{
+    std::vector<std::string> missing;
+    for (size_t i = 0; i < requiredEvents.size(); ++i)
+    {
+        if (diagnosticsJson.find(requiredEvents[i]) == std::string::npos)
+        {
+            missing.push_back(requiredEvents[i]);
+        }
+    }
+    return missing;
+}
+
+void AppendDeliveryEvidence(
+    int index,
+    const std::string& caseId,
+    notch_comfy::IHttpTransport& http,
+    CaseLogger& logger,
+    const MatrixOptions& options,
+    const long logStart,
+    const DeliveryRunState& state,
+    const std::string& negotiationJson,
+    const std::string& injectRequestJson,
+    const std::string& injectResponseJson,
+    const std::string& hashesJson,
+    const std::string& diagnosticsJson = "")
+{
+    logger.AppendCaseFile(index, caseId, "negotiation.json", CaseLogger::PrettyPrint(negotiationJson) + "\n");
+    if (!injectRequestJson.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "inject-request.json", CaseLogger::PrettyPrint(injectRequestJson) + "\n");
+    }
+    if (!injectResponseJson.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "inject-response.json", CaseLogger::PrettyPrint(injectResponseJson) + "\n");
+    }
+    if (!state.websocketFrames.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "websocket.jsonl", WebSocketFrameLog(state.websocketFrames));
+        logger.AppendCaseFile(index, caseId, "websocket-summary.json",
+                              CaseLogger::PrettyPrint(WebSocketSummaryJson(state)) + "\n");
+    }
+    if (state.outputReady)
+    {
+        logger.AppendCaseFile(index, caseId, "output-ready.json",
+                              CaseLogger::PrettyPrint(OutputReadyJson(state.output)) + "\n");
+    }
+    if (state.cudaStatus)
+    {
+        logger.AppendCaseFile(index, caseId, "cuda-share-status.json",
+                              CaseLogger::PrettyPrint(CudaShareStatusJson(state.cudaShare)) + "\n");
+    }
+    if (!hashesJson.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "hashes.json", CaseLogger::PrettyPrint(hashesJson) + "\n");
+    }
+    const std::string serverLog = ServerLogPath(options);
+    const long logEnd = FileSize(serverLog);
+    const std::string slice = ReadFileSlice(serverLog, logStart, logEnd);
+    if (!slice.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "server.log", slice);
+    }
+    if (!diagnosticsJson.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "notch-diagnostics.json",
+                              CaseLogger::PrettyPrint(diagnosticsJson) + "\n");
+    }
+    else
+    {
+        AppendPromptDiagnostics(index, caseId, http, logger, state.promptId);
+    }
+}
+
+void RunFilePathDeliveryCase(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,
     CaseLogger& logger,
     const MatrixOptions& options,
+    const notch_comfy::ServerDeploymentFacts& deployment,
     const std::string& caseId,
     const std::string& title,
     const std::string& description,
-    const std::string& workflowJson,
+    const std::string& transport,
     bool expectSuccess)
 {
     CaseRecord rec;
     rec.caseId = caseId;
     rec.title = title;
-    rec.phase = expectSuccess ? "queue-execution" : "file-availability";
+    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
     rec.description = description;
-    rec.specRef = expectSuccess ? kSpecExecution : kSpecFileAvailability;
-    rec.expectedJson = expectSuccess ? "{\"terminal\":\"execution_success\"}"
-                                     : "{\"blocked\":true}";
+    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.requiredTransport = transport;
 
-    const std::string serverLog = options.outputRoot + "/comfyui.log";
-    const long logStart = FileSize(serverLog);
+    const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
+    notch_comfy::OutputTransportOptions selectionOptions;
+    selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"disk", "http"};
+    selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
+    selectionOptions.m_clientReachableTransports = clientReachable;
+    selectionOptions.m_requiredTransport = transport;
+    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+
+    std::ostringstream negotiation;
+    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
+                << ",\"server_available\":" << CaseLogger::Array(selectionOptions.m_serverAvailableTransports)
+                << ",\"client_reachable\":" << CaseLogger::Array(selectionOptions.m_clientReachableTransports)
+                << ",\"required_transport\":" << CaseLogger::Quote(transport)
+                << ",\"choice\":" << ChoiceJson(choice) << "}";
+
+    if (!expectSuccess)
+    {
+        const bool ok = !choice.m_ok;
+        rec.expectedJson = "{\"selected\":false}";
+        rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
+        rec.result = ok ? "pass" : "fail";
+        if (!ok)
+        {
+            rec.errors.push_back("unexpected_accept");
+        }
+        const int index = recorder.Record(rec);
+        DeliveryRunState emptyState;
+        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        return;
+    }
+
+    const std::string sourcePath = DefaultSourceFilePath(options);
+    std::vector<uint8_t> sourceBytes;
+    std::string fileError;
+    if (sourcePath.empty() || !ReadBinaryFile(sourcePath, sourceBytes, fileError))
+    {
+        rec.expectedJson = "{\"fixture\":\"source_file_readable\"}";
+        rec.actualJson = "{\"source_path\":" + CaseLogger::Quote(sourcePath) +
+                         ",\"error\":" + CaseLogger::Quote(fileError) + "}";
+        rec.result = "error";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
+        return;
+    }
+
+    if (!choice.m_ok)
+    {
+        rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"hash_match\":true}";
+        rec.actualJson = "{\"selected\":false,\"choice\":" + ChoiceJson(choice) + "}";
+        rec.result = "fail";
+        rec.errors.push_back("unexpected_reject");
+        const int index = recorder.Record(rec);
+        DeliveryRunState emptyState;
+        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        return;
+    }
+
+    const std::string consumerId = caseId;
+    const std::string workflowJson = BuildRoundTripWorkflowJson("STRING", "file_path");
+    notch_comfy::WorkflowSubmissionRequest req;
+    req.m_workflowJson = workflowJson;
+    req.m_clientId = options.clientId;
+    req.m_consumerId = consumerId;
+    req.m_execute = true;
+    req.m_broadcastWs = true;
+    req.m_inputs.push_back(notch_comfy::InputValue::String("test_input", sourcePath, "STRING"));
+    req.m_output.m_transport = TransportKindFromName(transport);
+    req.m_output.m_type = "file_path";
+    req.m_output.m_extension = ExtensionFromPath(sourcePath);
+    if (transport == "disk")
+    {
+        req.m_output.m_path = DefaultLocalOutputPath(options);
+        req.m_output.m_filenamePrefix = caseId;
+    }
 
     std::string wsError;
     if (!ws.Connect(options.wsTimeoutMs, wsError))
     {
         rec.result = "error";
-        rec.actualJson = "{\"connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
+        rec.expectedJson = "{\"websocket_connected\":true}";
+        rec.actualJson = "{\"websocket_connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
         rec.errors.push_back("websocket_timeout");
         recorder.Record(rec);
         return;
     }
 
-    notch_comfy::WorkflowSubmissionRequest req;
-    req.m_workflowJson = workflowJson;
-    req.m_clientId = options.clientId;
-    req.m_execute = true;
-    req.m_broadcastWs = true;
     notch_comfy::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
     if (!built.m_ok)
     {
@@ -380,6 +915,7 @@ void RunExecutionCase(
         return;
     }
 
+    const long logStart = FileSize(ServerLogPath(options));
     notch_comfy::HttpResponse injectResponse;
     std::string sendError;
     if (!http.Send(built.m_request, injectResponse, sendError))
@@ -395,123 +931,439 @@ void RunExecutionCase(
     notch_comfy::WorkflowSubmissionResult submission;
     std::string parseError;
     const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
-    const bool queued = parsed && submission.m_queued;
-    const std::string promptId = submission.m_promptId;
+    DeliveryRunState state;
+    state.queued = parsed && submission.m_queued;
+    state.promptId = submission.m_promptId;
+    state.injectError = submission.m_error.empty() ? parseError : submission.m_error;
 
-    // Wait for the terminal WS event matching this prompt_id (only if queued).
-    std::vector<std::string> frames;
-    std::string terminalType;
-    bool terminalSuccess = false;
-    if (queued)
+    if (state.queued)
     {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options.executeTimeoutMs);
-        bool terminal = false;
-        while (!terminal && std::chrono::steady_clock::now() < deadline)
-        {
-            std::vector<std::string> batch = ws.DrainReceived();
-            for (size_t i = 0; i < batch.size(); ++i)
-            {
-                frames.push_back(batch[i]);
-                notch_comfy::WebSocketEvent event;
-                std::string evError;
-                if (!ClientProtocol::ParseWebSocketEvent(batch[i], event, evError))
-                {
-                    continue;
-                }
-                if (!event.m_promptId.empty() && event.m_promptId != promptId)
-                {
-                    continue;
-                }
-                if (event.m_kind == notch_comfy::EventExecutionSuccess)
-                {
-                    terminalType = "execution_success";
-                    terminalSuccess = true;
-                    terminal = true;
-                    break;
-                }
-                if (event.m_kind == notch_comfy::EventExecutionError ||
-                    event.m_kind == notch_comfy::EventExecutionInterrupted)
-                {
-                    terminalType = event.m_type;
-                    terminal = true;
-                    break;
-                }
-            }
-            if (!terminal)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        }
+        WaitForDeliveryEvents(ws, state.promptId, consumerId, transport, options.executeTimeoutMs, state);
     }
     ws.Close();
 
-    // Decide the verdict.
-    const bool blocked = !queued || (!terminalType.empty() && !terminalSuccess);
-    bool ok;
-    if (expectSuccess)
+    std::vector<uint8_t> outputBytes;
+    std::string outputPath;
+    std::string outputError;
+    bool outputRead = false;
+    if (state.outputReady)
     {
-        ok = terminalSuccess;
-        if (!ok)
+        if (transport == "disk")
         {
-            rec.errors.push_back(queued ? (terminalType.empty() ? "websocket_timeout" : "execution_error")
-                                        : "unexpected_reject");
+            outputPath = state.output.m_path;
+            outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
         }
-    }
-    else
-    {
-        ok = blocked;
-        if (!ok)
+        else if (transport == "http")
         {
-            rec.errors.push_back("unexpected_accept");
+            notch_comfy::HttpRequest getRequest;
+            getRequest.m_method = "GET";
+            getRequest.m_path = state.output.m_url;
+            notch_comfy::HttpResponse getResponse;
+            std::string getError;
+            if (http.Send(getRequest, getResponse, getError) && getResponse.m_statusCode == 200)
+            {
+                outputBytes.assign(getResponse.m_body.begin(), getResponse.m_body.end());
+                outputRead = true;
+                outputPath = state.output.m_url;
+            }
+            else
+            {
+                outputError = getError.empty() ? "http output fetch failed" : getError;
+            }
         }
     }
 
-    std::ostringstream actual;
-    actual << "{\"queued\":" << CaseLogger::Bool(queued)
-           << ",\"prompt_id\":" << CaseLogger::Quote(promptId)
-           << ",\"terminal\":" << CaseLogger::Quote(terminalType)
-           << ",\"blocked\":" << CaseLogger::Bool(blocked);
-    if (!queued && !submission.m_error.empty())
+    const std::string inputHash = Sha256Bytes(sourceBytes);
+    const std::string outputHash = outputRead ? Sha256Bytes(outputBytes) : "";
+    const bool hashMatch = outputRead && inputHash == outputHash;
+    std::string diagnosticsJson;
+    std::string diagnosticsError;
+    const bool diagnosticsFetched = state.promptId.empty()
+        ? false
+        : FetchPromptDiagnostics(http, state.promptId, diagnosticsJson, diagnosticsError);
+    std::vector<std::string> requiredDiagnosticsEvents;
+    if (state.queued)
     {
-        actual << ",\"inject_error\":" << CaseLogger::Quote(submission.m_error);
+        requiredDiagnosticsEvents = {
+            "inject.request_parsed",
+            "inject.output_config_patched",
+            "workflow.inputs_resolve_start",
+            "workflow.inputs_stamped",
+            "inject.inputs_stamped",
+            "inject.queue_submit",
+            "inject.queue_response",
+            "single_input.resolve_value",
+            "single_input.parse_value",
+            "output_node.config_resolved",
+            "output_node.payload_resolved",
+            "output_node.delivery_start",
+            "output.disk_delivery_start",
+            "output.disk_delivery_done",
+            "output.ready_broadcast",
+            "output_node.delivery_done",
+        };
+    }
+    const std::vector<std::string> missingDiagnostics =
+        diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
+                           : requiredDiagnosticsEvents;
+    const bool diagnosticsOk = state.queued && diagnosticsFetched && missingDiagnostics.empty();
+    const bool ok = state.queued && state.terminalSuccess && state.outputReady && hashMatch && diagnosticsOk;
+    if (!state.queued)
+    {
+        rec.errors.push_back("unexpected_reject");
+    }
+    if (state.queued && !state.terminalSuccess)
+    {
+        rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
+    }
+    if (state.terminalSuccess && !state.outputReady)
+    {
+        rec.errors.push_back("output_event_missing");
+    }
+    if (state.outputReady && !outputRead)
+    {
+        rec.errors.push_back("output_artifact_missing");
+    }
+    if (outputRead && !hashMatch)
+    {
+        rec.errors.push_back("output_hash_mismatch");
+    }
+    if (state.queued && !diagnosticsFetched)
+    {
+        rec.errors.push_back("ci_diagnostics_unavailable");
+    }
+    if (diagnosticsFetched && !missingDiagnostics.empty())
+    {
+        rec.errors.push_back("ci_diagnostics_missing_events");
+    }
+
+    std::ostringstream hashes;
+    hashes << "{\"inputs\":[{\"name\":\"test_input\",\"type\":\"STRING\",\"path\":"
+           << CaseLogger::Quote(sourcePath) << ",\"bytes\":" << sourceBytes.size()
+           << ",\"sha256\":" << CaseLogger::Quote(inputHash) << "}],"
+           << "\"outputs\":[{\"name\":" << CaseLogger::Quote(consumerId)
+           << ",\"transport\":" << CaseLogger::Quote(transport)
+           << ",\"path\":" << CaseLogger::Quote(outputPath)
+           << ",\"bytes\":" << outputBytes.size()
+           << ",\"sha256\":" << CaseLogger::Quote(outputHash)
+           << ",\"comparison\":\"exact_file_copy\"}]}";
+
+    std::ostringstream actual;
+    actual << "{\"selected_transport\":" << CaseLogger::Quote(choice.m_transport)
+           << ",\"queued\":" << CaseLogger::Bool(state.queued)
+           << ",\"prompt_id\":" << CaseLogger::Quote(state.promptId)
+           << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
+           << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
+           << ",\"output_read\":" << CaseLogger::Bool(outputRead)
+           << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
+           << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
+           << ",\"diagnostics_missing_events\":" << CaseLogger::Array(missingDiagnostics)
+           << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
+           << ",\"output_sha256\":" << CaseLogger::Quote(outputHash);
+    if (!outputError.empty())
+    {
+        actual << ",\"output_error\":" << CaseLogger::Quote(outputError);
+    }
+    if (!diagnosticsError.empty())
+    {
+        actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"hash_match\":true,\"diagnostics_complete\":true}";
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
     const int index = recorder.Record(rec);
+    AppendDeliveryEvidence(index, caseId, http, logger, options, logStart, state,
+                           negotiation.str(), built.m_request.m_body, injectResponse.m_body, hashes.str(),
+                           diagnosticsJson);
+}
 
-    // Per-case evidence: WS frames, the server.log slice for this run, and the
-    // Notch diagnostics captured under this prompt_id (context, not pass/fail).
-    if (!frames.empty())
+void RunCudaDeliveryCase(
+    CaseRecorder& recorder,
+    notch_comfy::IHttpTransport& http,
+    IWebSocketProbe& ws,
+    CaseLogger& logger,
+    const MatrixOptions& options,
+    const notch_comfy::ServerDeploymentFacts& deployment,
+    ICudaShareReader* cudaReader,
+    const std::string& caseId,
+    const std::string& title,
+    const std::string& description,
+    bool expectSuccess)
+{
+    CaseRecord rec;
+    rec.caseId = caseId;
+    rec.title = title;
+    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.description = description;
+    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.requiredTransport = "cuda";
+
+    const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
+    notch_comfy::OutputTransportOptions selectionOptions;
+    selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"cuda", "disk", "http"};
+    selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
+    selectionOptions.m_clientReachableTransports = clientReachable;
+    selectionOptions.m_requiredTransport = "cuda";
+    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+
+    std::ostringstream negotiation;
+    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
+                << ",\"server_available\":" << CaseLogger::Array(selectionOptions.m_serverAvailableTransports)
+                << ",\"client_reachable\":" << CaseLogger::Array(selectionOptions.m_clientReachableTransports)
+                << ",\"required_transport\":\"cuda\""
+                << ",\"choice\":" << ChoiceJson(choice) << "}";
+
+    if (!expectSuccess)
     {
-        std::string wsLog;
-        for (size_t i = 0; i < frames.size(); ++i)
+        const bool ok = !choice.m_ok;
+        rec.expectedJson = "{\"selected\":false}";
+        rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
+        rec.result = ok ? "pass" : "fail";
+        if (!ok)
         {
-            wsLog += frames[i];
-            wsLog += "\n";
+            rec.errors.push_back("unexpected_accept");
         }
-        logger.AppendCaseFile(index, caseId, "websocket.jsonl", wsLog);
+        const int index = recorder.Record(rec);
+        DeliveryRunState emptyState;
+        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        return;
     }
-    const long logEnd = FileSize(serverLog);
-    const std::string slice = ReadFileSlice(serverLog, logStart, logEnd);
-    if (!slice.empty())
+
+    if (!choice.m_ok || !ContainsTransport(selectionOptions.m_serverAvailableTransports, "cuda") ||
+        deployment.m_cudaDeviceIndex < 0)
     {
-        logger.AppendCaseFile(index, caseId, "server.log", slice);
+        rec.expectedJson = "{\"cuda_available\":true}";
+        rec.actualJson = "{\"cuda_available\":false,\"choice\":" + ChoiceJson(choice) + "}";
+        rec.result = "skip";
+        rec.errors.push_back("cuda_unavailable");
+        const int index = recorder.Record(rec);
+        DeliveryRunState emptyState;
+        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        return;
     }
-    if (!promptId.empty())
+
+    if (cudaReader == nullptr)
     {
-        notch_comfy::HttpRequest diagRequest;
-        diagRequest.m_method = "GET";
-        diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
-        diagRequest.m_contentType = "application/json";
-        notch_comfy::HttpResponse diagResponse;
-        std::string diagError;
-        if (http.Send(diagRequest, diagResponse, diagError) && !diagResponse.m_body.empty())
-        {
-            logger.AppendCaseFile(index, caseId, "notch-diagnostics.json",
-                                  CaseLogger::PrettyPrint(diagResponse.m_body) + "\n");
-        }
+        rec.expectedJson = "{\"cuda_reader_available\":true}";
+        rec.actualJson = "{\"cuda_reader_available\":false}";
+        rec.result = "skip";
+        rec.errors.push_back("cuda_reader_unavailable");
+        recorder.Record(rec);
+        return;
+    }
+
+    const int width = 8;
+    const int height = 8;
+    std::vector<uint8_t> imageBytes = BuildFloat32RgbPattern(width, height);
+    std::vector<uint8_t> expectedCudaBytes = BuildExpectedFloat32RgbaPattern(width, height);
+
+    const std::string consumerId = caseId;
+    const std::string workflowJson = BuildRoundTripWorkflowJson("IMAGE", "image");
+    notch_comfy::WorkflowSubmissionRequest req;
+    req.m_workflowJson = workflowJson;
+    req.m_clientId = options.clientId;
+    req.m_consumerId = consumerId;
+    req.m_execute = true;
+    req.m_broadcastWs = true;
+    notch_comfy::InputValue imageInput =
+        notch_comfy::InputValue::Binary("test_input", imageBytes, "cuda_input.float32rgb", "IMAGE");
+    imageInput.m_rawBuffer.m_enabled = true;
+    imageInput.m_rawBuffer.m_width = width;
+    imageInput.m_rawBuffer.m_height = height;
+    imageInput.m_rawBuffer.m_format = "float32_rgb";
+    imageInput.m_rawBuffer.m_stride = width * 3 * 4;
+    req.m_inputs.push_back(imageInput);
+    req.m_output.m_transport = notch_comfy::OutputTransportCuda;
+    req.m_output.m_type = "image";
+
+    std::string wsError;
+    if (!ws.Connect(options.wsTimeoutMs, wsError))
+    {
+        rec.result = "error";
+        rec.expectedJson = "{\"websocket_connected\":true}";
+        rec.actualJson = "{\"websocket_connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
+        rec.errors.push_back("websocket_timeout");
+        recorder.Record(rec);
+        return;
+    }
+
+    notch_comfy::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
+    if (!built.m_ok)
+    {
+        ws.Close();
+        rec.result = "error";
+        rec.actualJson = "{\"build_error\":" + CaseLogger::Quote(built.m_error) + "}";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
+        return;
+    }
+
+    const long logStart = FileSize(ServerLogPath(options));
+    notch_comfy::HttpResponse injectResponse;
+    std::string sendError;
+    if (!http.Send(built.m_request, injectResponse, sendError))
+    {
+        ws.Close();
+        rec.result = "error";
+        rec.actualJson = "{\"inject_error\":" + CaseLogger::Quote(sendError) + "}";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
+        return;
+    }
+
+    notch_comfy::WorkflowSubmissionResult submission;
+    std::string parseError;
+    const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
+    DeliveryRunState state;
+    state.queued = parsed && submission.m_queued;
+    state.promptId = submission.m_promptId;
+    state.injectError = submission.m_error.empty() ? parseError : submission.m_error;
+    if (state.queued)
+    {
+        WaitForDeliveryEvents(ws, state.promptId, consumerId, "cuda", options.executeTimeoutMs, state);
+    }
+    ws.Close();
+
+    notch_comfy::HttpRequest infoRequest;
+    infoRequest.m_method = "GET";
+    infoRequest.m_path = "/notch/cuda/share/" + consumerId;
+    notch_comfy::HttpResponse infoResponse;
+    std::string infoError;
+    bool infoOk = http.Send(infoRequest, infoResponse, infoError) && infoResponse.m_statusCode == 200;
+
+    const std::string inputHash = Sha256Bytes(imageBytes);
+    const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
+    std::vector<uint8_t> cudaBytes;
+    std::string cudaReadError;
+    const bool cudaRead = state.cudaStatus && cudaReader->ReadShare(state.cudaShare, cudaBytes, cudaReadError);
+    const std::string outputHash = cudaRead ? Sha256Bytes(cudaBytes) : "";
+    const bool hashMatch = cudaRead && outputHash == expectedOutputHash;
+    const bool shapeOk = state.cudaStatus && state.cudaShare.m_width == width && state.cudaShare.m_height == height &&
+                         state.cudaShare.m_channels == 4 && state.cudaShare.m_dtype == "float32";
+    std::string diagnosticsJson;
+    std::string diagnosticsError;
+    const bool diagnosticsFetched = state.promptId.empty()
+        ? false
+        : FetchPromptDiagnostics(http, state.promptId, diagnosticsJson, diagnosticsError);
+    std::vector<std::string> requiredDiagnosticsEvents;
+    if (state.queued)
+    {
+        requiredDiagnosticsEvents = {
+            "inject.request_parsed",
+            "input.multipart_processed",
+            "inject.output_config_patched",
+            "workflow.inputs_resolve_start",
+            "workflow.inputs_stamped",
+            "inject.inputs_stamped",
+            "inject.queue_submit",
+            "inject.queue_response",
+            "single_input.resolve_value",
+            "single_input.parse_value",
+            "output_node.config_resolved",
+            "output_node.payload_resolved",
+            "output_node.delivery_start",
+            "output.cuda_delivery_start",
+            "cuda.share_status_broadcast",
+            "output.cuda_delivery_done",
+            "output_node.delivery_done",
+        };
+    }
+    const std::vector<std::string> missingDiagnostics =
+        diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
+                           : requiredDiagnosticsEvents;
+    const bool diagnosticsOk = state.queued && diagnosticsFetched && missingDiagnostics.empty();
+    const bool ok = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk && hashMatch &&
+                    diagnosticsOk;
+    if (!state.queued)
+    {
+        rec.errors.push_back("unexpected_reject");
+    }
+    if (state.queued && !state.terminalSuccess)
+    {
+        rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
+    }
+    if (state.terminalSuccess && !state.cudaStatus)
+    {
+        rec.errors.push_back("cuda_status_missing");
+    }
+    if (state.cudaStatus && !shapeOk)
+    {
+        rec.errors.push_back("cuda_metadata_mismatch");
+    }
+    if (!infoOk)
+    {
+        rec.errors.push_back("cuda_status_missing");
+    }
+    if (state.cudaStatus && !cudaRead)
+    {
+        rec.errors.push_back("cuda_import_failed");
+    }
+    if (cudaRead && !hashMatch)
+    {
+        rec.errors.push_back("output_hash_mismatch");
+    }
+    if (state.queued && !diagnosticsFetched)
+    {
+        rec.errors.push_back("ci_diagnostics_unavailable");
+    }
+    if (diagnosticsFetched && !missingDiagnostics.empty())
+    {
+        rec.errors.push_back("ci_diagnostics_missing_events");
+    }
+
+    std::ostringstream hashes;
+    hashes << "{\"inputs\":[{\"name\":\"test_input\",\"type\":\"IMAGE\",\"path\":"
+           << CaseLogger::Quote("raw-buffer:float32_rgb") << ",\"bytes\":" << imageBytes.size()
+           << ",\"sha256\":" << CaseLogger::Quote(inputHash) << "}],"
+           << "\"outputs\":[{\"name\":" << CaseLogger::Quote(consumerId)
+           << ",\"transport\":\"cuda\",\"comparison\":\"exact_float32_rgba_cuda_buffer\","
+           << "\"bytes\":" << cudaBytes.size()
+           << ",\"sha256\":" << CaseLogger::Quote(outputHash)
+           << ",\"expected_sha256\":" << CaseLogger::Quote(expectedOutputHash)
+           << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
+           << ",\"cuda_read\":" << CaseLogger::Bool(cudaRead)
+           << ",\"width\":" << state.cudaShare.m_width
+           << ",\"height\":" << state.cudaShare.m_height
+           << ",\"channels\":" << state.cudaShare.m_channels
+           << ",\"dtype\":" << CaseLogger::Quote(state.cudaShare.m_dtype)
+           << ",\"data_size_bytes\":" << state.cudaShare.m_dataSizeBytes << "}]}";
+
+    std::ostringstream actual;
+    actual << "{\"selected_transport\":" << CaseLogger::Quote(choice.m_transport)
+           << ",\"queued\":" << CaseLogger::Bool(state.queued)
+           << ",\"prompt_id\":" << CaseLogger::Quote(state.promptId)
+           << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
+           << ",\"cuda_status\":" << CaseLogger::Bool(state.cudaStatus)
+           << ",\"cuda_info_get\":" << CaseLogger::Bool(infoOk)
+           << ",\"cuda_read\":" << CaseLogger::Bool(cudaRead)
+           << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
+           << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
+           << ",\"diagnostics_missing_events\":" << CaseLogger::Array(missingDiagnostics)
+           << ",\"width\":" << state.cudaShare.m_width
+           << ",\"height\":" << state.cudaShare.m_height
+           << ",\"channels\":" << state.cudaShare.m_channels
+           << ",\"dtype\":" << CaseLogger::Quote(state.cudaShare.m_dtype)
+           << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
+           << ",\"output_sha256\":" << CaseLogger::Quote(outputHash)
+           << ",\"expected_output_sha256\":" << CaseLogger::Quote(expectedOutputHash);
+    if (!diagnosticsError.empty())
+    {
+        actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
+    }
+    actual << "}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"hash_match\":true,\"diagnostics_complete\":true}";
+    rec.actualJson = actual.str();
+    rec.result = ok ? "pass" : "fail";
+
+    const int index = recorder.Record(rec);
+    AppendDeliveryEvidence(index, caseId, http, logger, options, logStart, state,
+                           negotiation.str(), built.m_request.m_body, injectResponse.m_body, hashes.str(),
+                           diagnosticsJson);
+    if (infoOk && !infoResponse.m_body.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "cuda-share-info.json", CaseLogger::PrettyPrint(infoResponse.m_body) + "\n");
     }
 }
 
@@ -730,55 +1582,58 @@ void RunNegotiationCases(
     }
 }
 
-// Internal support checks: submit a workflow for execution and assert the
-// terminal WS event; submit a missing-file workflow and assert it is blocked.
-// These do NOT test output delivery (no NotchOutputNode); the real delivery
-// phase is the planned round-trip suite in the spec.
-void RunQueueExecutionAndFileAvailabilityCases(
+void RunDeliveryCases(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
-    CaseLogger& logger)
+    CaseLogger& logger,
+    const notch_comfy::ServerDeploymentFacts& deployment,
+    ICudaShareReader* cudaReader)
 {
-    if (options.executeWorkflowJson.empty())
+    if (options.phase == Phase::DeliveryLocal)
     {
-        CaseRecord rec;
-        rec.caseId = "workflow-execution";
-        rec.title = "Workflow execution skipped (no execute workflow fixture)";
-        rec.phase = "queue-execution";
-        rec.description = "No execute workflow fixture was supplied, so workflow execution was not exercised.";
-        rec.specRef = kSpecExecution;
-        rec.actualJson = "{\"reason\":\"no_execute_workflow\"}";
-        rec.result = "skip";
-        recorder.Record(rec);
-    }
-    else
-    {
-        RunExecutionCase(recorder, http, ws, logger, options, "workflow-execution",
-            "A submitted workflow runs to execution_success",
-            "Submit a workflow with execute=true and wait for the terminal WebSocket event; it must reach execution_success. This proves the inject -> queue -> execute -> success lifecycle.",
-            options.executeWorkflowJson, /*expectSuccess=*/true);
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
+            "local-file-path-disk",
+            "Local file path output over disk preserves bytes",
+            "Inject a deterministic file path through NotchSingleInput, execute, receive notch-output-ready with a disk path, read the artifact locally, and compare SHA-256 with the source file.",
+            "disk",
+            true);
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
+            "local-file-path-http",
+            "Local file path output over HTTP preserves bytes",
+            "Inject a deterministic file path through NotchSingleInput, execute, receive notch-output-ready with an HTTP artifact URL, fetch it, and compare SHA-256 with the source file.",
+            "http",
+            true);
+        RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment,
+            cudaReader,
+            "local-image-cuda",
+            "Local image output over CUDA publishes a valid share",
+            "Inject an image path through NotchSingleInput, execute, require CUDA output, and verify the CUDA share-status/diagnostics path when the server advertises CUDA.",
+            true);
+        return;
     }
 
-    if (options.executeMissingFileJson.empty())
+    if (options.phase == Phase::DeliveryRemote)
     {
-        CaseRecord rec;
-        rec.caseId = "missing-input-file";
-        rec.title = "File-availability enforcement skipped (no missing-file fixture)";
-        rec.phase = "file-availability";
-        rec.description = "No missing-file fixture was supplied, so file-availability enforcement was not exercised.";
-        rec.specRef = kSpecFileAvailability;
-        rec.actualJson = "{\"reason\":\"no_missing_file_workflow\"}";
-        rec.result = "skip";
-        recorder.Record(rec);
-    }
-    else
-    {
-        RunExecutionCase(recorder, http, ws, logger, options, "missing-input-file",
-            "A workflow referencing a missing input file is blocked",
-            "Submit a workflow that references an input file the server does not have, with execute=true. The run must be blocked (rejected at inject or terminated with execution_error) and must not reach execution_success.",
-            options.executeMissingFileJson, /*expectSuccess=*/false);
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
+            "remote-file-path-http",
+            "Remote file path output over HTTP preserves bytes",
+            "From a separate client container, inject a deterministic file path, execute on the server container, receive a URL, fetch bytes over HTTP, and compare SHA-256 with the source file.",
+            "http",
+            true);
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
+            "remote-file-path-disk-rejected",
+            "Remote file path output rejects unreachable disk transport",
+            "The remote client exposes only HTTP reachability, so a hard disk request must be rejected by client-side transport selection before inject; no silent downgrade is allowed.",
+            "disk",
+            false);
+        RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment,
+            cudaReader,
+            "remote-image-cuda-rejected",
+            "Remote image output rejects host-local CUDA transport",
+            "The remote client exposes only HTTP reachability, so a hard CUDA request must be rejected by client-side transport selection before inject.",
+            false);
     }
 }
 
@@ -787,9 +1642,10 @@ const char* PhaseName(Phase phase)
     switch (phase)
     {
     case Phase::Negotiation: return "negotiation";
-    case Phase::All: return "all";
+    case Phase::DeliveryLocal: return "delivery_local";
+    case Phase::DeliveryRemote: return "delivery_remote";
     }
-    return "all";
+    return "negotiation";
 }
 
 } // namespace
@@ -798,7 +1654,8 @@ MatrixSummary RunConformance(
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
-    CaseLogger& logger)
+    CaseLogger& logger,
+    ICudaShareReader* cudaReader)
 {
     MatrixSummary summary;
     CaseRecorder recorder(logger, summary);
@@ -849,10 +1706,13 @@ MatrixSummary RunConformance(
         logger.Event(json.str());
     }
 
-    RunNegotiationCases(recorder, http, ws, options, serverCompat);
-    if (options.phase == Phase::All)
+    if (options.phase == Phase::Negotiation)
     {
-        RunQueueExecutionAndFileAvailabilityCases(recorder, http, ws, options, logger);
+        RunNegotiationCases(recorder, http, ws, options, serverCompat);
+    }
+    else
+    {
+        RunDeliveryCases(recorder, http, ws, options, logger, deployment, cudaReader);
     }
 
     logger.WriteIndex();

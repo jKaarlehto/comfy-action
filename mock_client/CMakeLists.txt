@@ -29,11 +29,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ixwebsocket)
 
+find_package(CUDAToolkit QUIET)
+
 # Transport-agnostic contract logic. Depends only on the client interface, so it
 # can be reused and self-tested without the transport library.
 add_library(notch_mock_matrix STATIC
     src/matrix.cpp
     src/case_logger.cpp
+    src/hash_utils.cpp
 )
 target_include_directories(notch_mock_matrix PUBLIC src)
 target_link_libraries(notch_mock_matrix PUBLIC notch_comfy_client)
@@ -45,6 +48,11 @@ add_executable(notch_mock_client
     src/transports/local_websocket_transport.cpp
 )
 target_link_libraries(notch_mock_client PRIVATE notch_mock_matrix ixwebsocket)
+if(CUDAToolkit_FOUND)
+    target_sources(notch_mock_client PRIVATE src/transports/local_cuda_share_reader.cpp)
+    target_link_libraries(notch_mock_client PRIVATE CUDA::cuda_driver)
+    target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_DRIVER=1)
+endif()
 
 # Transport-agnostic self-test: exercises the matrix with stub transports, no
 # network and no IXWebSocket. Runs as part of the build verification.

@@ -23,11 +23,17 @@ Notch node classes and server feature facts.
 - write environment, compatibility, log, and result artifacts.
 
 `mode: protocol_negotiation` runs the boot setup and then the C++ mock client's
-discovery + transport-negotiation + readiness-decision cases (Layer 1, no GPU).
+discovery + transport-negotiation + readiness-decision cases (Layer 1).
 
-Real delivery testing is planned as a separate round-trip job. It will exercise
-`NotchSingleInput -> execute -> NotchOutputNode -> client fetch/import -> verify`
-instead of a thin queue-only check.
+`mode: delivery_local` runs the boot setup and then local delivery cases:
+`NotchSingleInput -> execute -> NotchOutputNode -> disk/http/cuda -> verify`.
+Disk and HTTP compare exact SHA-256 bytes for a file-path artifact. CUDA uses a
+deterministic raw-buffer IMAGE input and hashes the imported CUDA shared buffer
+when CUDA and the CUDA reader are available.
+
+`mode: delivery_remote` runs a two-container topology: a ComfyUI server
+container plus a mock-client container on a private Docker network. It verifies
+remote HTTP byte delivery and hard rejection of unreachable disk/CUDA requests.
 
 ## Runner Model
 
@@ -81,7 +87,7 @@ checks on a floating branch.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds the Layer-1 discovery + transport-negotiation + readiness cases. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds Layer-1 discovery + transport-negotiation + readiness. `delivery_local` runs local disk/http/cuda delivery. `delivery_remote` runs the two-container remote delivery topology. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
@@ -115,7 +121,7 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `object-info-summary.json`
 - `object-info-debug.json` when node discovery fails
 - `extension-boot-result.json`
-- `conformance-result.json` when `mode: protocol_negotiation`
+- `conformance-result.json` when `mode` is `protocol_negotiation`, `delivery_local`, or `delivery_remote`
 - `compatibility-result.json`
 
 `compatibility-result.json` is the file to use when promoting a
