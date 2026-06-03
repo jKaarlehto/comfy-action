@@ -133,7 +133,7 @@ use in their worked examples.
 
 ## 4. Exact case counts
 
-### Layer 1 — Selection + Discovery (pure; single server; **no execution**) = 18
+### Layer 1 — Selection + Discovery (pure; single server; **no execution**) = 19
 
 | Component | Axes | Count | Derivation |
 |---|---|---|---|
@@ -141,7 +141,7 @@ use in their worked examples.
 | Type-axis discovery (live `/notch/parse`) | A1 | 2 | `|T|` = {image, non-image} |
 | Deployment-readiness decision (live `/notch/get-required-files`; no execution) | A5 | 2 | all required files exist vs ≥1 missing |
 | Hard selection | A1·A2·A3·A4 | 10 | 5 positives + 5 rejects (below) |
-| Soft selection | A4 | 2 | skip-unusable-preferred + fallback-to-first-usable |
+| Soft selection | A4 | 3 | canonical order `cuda>http>disk`: top-usable chosen, http-over-disk when no cuda, and the debug-mask path forcing disk |
 
 Hard = **10**: positives `cuda(1) + disk×{img,nonimg}(2) + http×{img,nonimg}(2) = 5`;
 rejects `cuda-by-T(1) + cuda-by-S(1) + cuda-by-C(1) + disk-by-C(1) + empty(1) = 5`.
@@ -166,8 +166,8 @@ topology → **docker-compose** (separate remote-topology mode).
 ### Totals (exact)
 
 ```
-v1  (Layer 1)            = 18
-full v2 (Layer 1 + 2)    = 18 + 13 = 31
+v1  (Layer 1)            = 19
+full v2 (Layer 1 + 2)    = 19 + 13 = 32
 ```
 
 ## 5. Growth rules — how the count changes when behavior grows
@@ -206,8 +206,12 @@ agrees at delivery time — that is the Layer-2 job.
 The cases are generated from data, not hand-written per test:
 
 - **Selection** — `mock_client/src/matrix.cpp` `kHardRows` (10) and `kSoftRows`
-  (2). Each row is one `(typeAllowed, serverAvailable, clientReachable,
-  requested|order, expect)` tuple → one case. Add a row = add a case.
+  (3). Each row is one `(typeAllowed, serverAvailable, clientReachable,
+  requiredOrPreference, expect)` tuple → one case. Add a row = add a case. Hard
+  rows set a single required transport; soft rows pass the canonical client
+  preference order `cuda>http>disk` (see §Negotiation in ComfyUI-Notch
+  `features.md`), and the debug-mask soft row narrows `clientReachable` to force
+  disk.
 - **Type-axis** — one case per output in the `/notch/parse` fixture; expected
   transports come from `ExpectedTypeTransports()` (image → cuda,disk,http; else →
   disk,http).
@@ -220,7 +224,7 @@ The cases are generated from data, not hand-written per test:
 executable form of §4** — change the spec, change the asserted count. Today:
 
 ```
-stub matrix: pass=18 fail=0 skip=0 error=0   ← Layer 1 exact
+stub matrix: pass=19 fail=0 skip=0 error=0   ← Layer 1 exact
 ```
 
 ### Artifact shape
@@ -244,10 +248,10 @@ contract — read line by line, not pretty-printed).
 
 ## 8. Status vs v2
 
-- **Layer 1 (18):** stub-verified as the contract matrix — all 18 cases run and
+- **Layer 1 (19):** stub-verified as the contract matrix — all 19 cases run and
   pass against stub transports (`mock_client/tests/stub_check.cpp`). The live run
   ships discovery and readiness fixtures (`mock_client/fixtures/`) so it also
-  exercises all 18 — type-axis (image + mesh) and readiness decision (ready +
+  exercises all 19 — type-axis (image + mesh) and readiness decision (ready +
   missing) included. Live coverage is partial unless those fixtures are supplied;
   a missing fixture is reported as a `skip` rather than reducing the contract
   count. Note the A5 cases verify the **client readiness decision**, not yet

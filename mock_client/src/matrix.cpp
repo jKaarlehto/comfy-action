@@ -73,56 +73,71 @@ struct SelectionRow
     std::string typeAllowed;
     std::string serverAvailable;
     std::string clientReachable;
-    std::string requestedOrOrder; // single transport (hard) or csv order (soft)
+    std::string requiredOrPreference; // hard: the single required transport; soft: the csv preference order
     bool expectOk;
     std::string expectTransport;
 };
 
-// Boundary-complete hard-request matrix: 5 positives (cuda; disk and http per
-// type class) + 5 rejects (cuda excluded independently by type, server, and
-// client; disk excluded by client; empty intersection). The cuda reject is
-// isolated to one axis per row, so server-unavailable (no GPU) and
-// client-unreachable (remote) cuda rejections are distinct cases.
+// Each row names the behavioral boundary it proves, not its incidental fixture
+// values. The selection helper is purely set-based (usable = typeAllowed n
+// serverAvailable n clientReachable; hard request honored iff usable else
+// rejected; soft order takes the first usable, else the first usable overall).
+// Positives use a maximal fixture (every transport available and reachable) so
+// the only thing that varies is the request — proving "requested-and-usable =>
+// selected" and that the request is not auto-changed. Negatives isolate the one
+// axis that removes the requested transport (type, server, or client), with the
+// other axes permissive, so the row proves that axis alone causes the reject.
+// 5 positives (cuda + disk/http per type class) + 5 negatives.
 const SelectionRow kHardRows[] = {
-    {"image-cuda-local", "IMAGE output, local client, server has GPU — client requests cuda, gets cuda",
-     "The output is an IMAGE (cuda allowed by type), the server has a CUDA device, and the client is on the same host (can receive a GPU share). cuda is usable, so the client's cuda request is honored.",
+    // Positives — requested-and-usable => selected (maximal fixture).
+    {"image-cuda-usable", "IMAGE output — client requests cuda, gets cuda",
+     "Positive cuda boundary for IMAGE. cuda is type-allowed, server-available, and client-reachable, so the hard cuda request is honored. Every transport is usable in the fixture, so cuda being chosen over the also-usable disk/http shows the request is honored as-is, not auto-changed.",
      "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", true, "cuda"},
-    {"image-disk-without-cuda", "IMAGE output, local client, server has no GPU — client requests disk, gets disk",
-     "No CUDA on the server, but disk is allowed by type, server-available, and reachable on the same host, so the client's disk request is honored.",
-     "cuda,disk,http", "disk,http", "disk,http", "disk", true, "disk"},
-    {"image-http-only-client", "IMAGE output, remote client (http only) — client requests http, gets http",
-     "A remote client can only receive over http; http is usable, so the client's http request is honored.",
-     "cuda,disk,http", "disk,http", "http", "http", true, "http"},
-    {"nonimage-rejects-cuda-by-type", "Non-image output — client requests cuda, rejected (cuda is image-only)",
-     "The output type is not IMAGE (e.g. a 3D mesh or file), so cuda is not allowed by type at all. The client's cuda request is rejected — never silently downgraded.",
+    {"image-disk-usable", "IMAGE output — client requests disk, gets disk",
+     "Positive disk boundary for IMAGE. disk is usable, so the hard disk request is honored. The fixture makes cuda usable too, so disk being chosen proves the request wins (no auto-upgrade to cuda). Other transports are incidental.",
+     "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "disk", true, "disk"},
+    {"image-http-usable", "IMAGE output — client requests http, gets http",
+     "Positive http boundary for IMAGE. http is usable, so the hard http request is honored; the request alone determines the choice.",
+     "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "http", true, "http"},
+    {"nonimage-disk-usable", "Non-image output — client requests disk, gets disk",
+     "Positive disk boundary for a non-image output (type-allowed = disk/http; cuda is image-only). disk is usable, so the hard disk request is honored. Server and client also offer cuda, but type excludes it — incidental to this positive.",
+     "disk,http", "cuda,disk,http", "cuda,disk,http", "disk", true, "disk"},
+    {"nonimage-http-usable", "Non-image output — client requests http, gets http",
+     "Positive http boundary for a non-image output. http is usable, so the hard http request is honored.",
+     "disk,http", "cuda,disk,http", "cuda,disk,http", "http", true, "http"},
+    // Negatives — request rejected; each isolates the single excluding axis.
+    {"nonimage-cuda-rejected-by-type", "Non-image output — client requests cuda, rejected (cuda is image-only)",
+     "Negative cuda boundary isolating the type axis: server and client both offer cuda, but the output type is not IMAGE so cuda is not type-allowed at all. The hard cuda request is rejected — never silently downgraded.",
      "disk,http", "cuda,disk,http", "cuda,disk,http", "cuda", false, ""},
-    {"nonimage-disk-local", "Non-image output, local client — client requests disk, gets disk",
-     "A non-image output allows disk/http; the client is on the same host, so disk is reachable and the client's disk request is honored.",
-     "disk,http", "disk,http", "disk,http", "disk", true, "disk"},
-    {"nonimage-rejects-unreachable-disk", "Non-image output, remote client (http only) — client requests disk, rejected (disk not reachable)",
-     "disk is allowed by type and server-available, but a remote client has no shared filesystem to read it. The client's disk request is rejected — no downgrade.",
-     "disk,http", "disk,http", "http", "disk", false, ""},
-    {"filepath-http-only-client", "File-path output, remote client (http only) — client requests http, gets http",
-     "A file-path output allows disk/http; the remote client can only receive http, which is usable, so its http request is honored.",
-     "disk,http", "disk,http", "http", "http", true, "http"},
-    {"image-rejects-cuda-by-server", "IMAGE output, server has no GPU — client requests cuda, rejected (server can't deliver cuda)",
-     "cuda is allowed by type and the client is local, but the server has no CUDA device to produce a GPU share. The client's cuda request is rejected — server availability rules it out.",
+    {"image-cuda-rejected-by-server", "IMAGE output, server has no GPU — client requests cuda, rejected",
+     "Negative cuda boundary isolating the server axis: cuda is type-allowed and client-reachable, but the server has no CUDA device, so cuda is not server-available. The hard cuda request is rejected (no downgrade).",
      "cuda,disk,http", "disk,http", "cuda,disk,http", "cuda", false, ""},
-    {"image-rejects-cuda-by-client", "IMAGE output, remote client — client requests cuda, rejected (remote can't receive a GPU share)",
-     "cuda is allowed by type and the server has a GPU, but the client is remote and cannot receive a host-local GPU share. The client's cuda request is rejected — client reachability rules it out.",
-     "cuda,disk,http", "cuda,disk,http", "http", "cuda", false, ""},
-    {"empty-intersection-fails", "Output type, server, and client share no transport — client requests cuda, rejected (nothing usable)",
-     "The type-allowed, server-available, and client-reachable sets do not intersect, so there is no usable transport and selection fails.",
+    {"image-cuda-rejected-by-client", "IMAGE output, remote client — client requests cuda, rejected",
+     "Negative cuda boundary isolating the client axis: cuda is type-allowed and server-available, but the client is remote and cannot receive a host-local GPU share, so cuda is not client-reachable. The hard cuda request is rejected (no downgrade).",
+     "cuda,disk,http", "cuda,disk,http", "disk,http", "cuda", false, ""},
+    {"nonimage-disk-rejected-by-client", "Non-image output, remote client (http only) — client requests disk, rejected",
+     "Negative disk boundary isolating the client axis: disk is type-allowed and server-available, but a remote http-only client has no shared filesystem, so disk is not client-reachable. The hard disk request is rejected (no downgrade).",
+     "disk,http", "disk,http", "http", "disk", false, ""},
+    {"empty-intersection-fails", "No transport is type-allowed, server-available, and client-reachable — request rejected",
+     "Negative boundary where the three eligibility sets do not intersect: the type allows only disk/http, but the server and client offer only cuda. There is no usable transport, so any request fails.",
      "disk,http", "cuda", "cuda", "cuda", false, ""},
 };
 
+// Soft preference order is client-owned but part of negotiation; the canonical
+// Notch client order is cuda > http > disk (http is always at least as available
+// as disk; disk exists for users tracing dataflows over an easily-inspectable
+// medium). These prove the helper respects that order, including the debug flow
+// where the client masks cuda+http from its own reachable set to force disk.
 const SelectionRow kSoftRows[] = {
-    {"prefer-cuda-then-disk", "IMAGE output, server has no GPU — client prefers cuda then disk, gets disk",
-     "Soft preference order: the client lists cuda, disk, http and takes the first usable one. cuda isn't usable (no server GPU), so disk is chosen.",
-     "cuda,disk,http", "disk,http", "disk,http", "cuda,disk,http", true, "disk"},
-    {"no-order-match-but-usable", "Non-image output, remote client — client prefers cuda then disk, falls back to http",
-     "None of the client's preferred transports (cuda, disk) are usable for a remote non-image output, so the helper falls back to the first usable transport, http.",
-     "disk,http", "disk,http", "http", "cuda,disk", true, "http"},
+    {"soft-prefers-cuda-when-all-usable", "Soft preference cuda>http>disk, all usable — cuda chosen (top of order)",
+     "The Notch client's canonical preference order is cuda > http > disk. With every transport usable, the helper picks the top of the order: cuda.",
+     "cuda,disk,http", "cuda,disk,http", "cuda,disk,http", "cuda,http,disk", true, "cuda"},
+    {"soft-prefers-http-over-disk", "Soft preference cuda>http>disk, no cuda — http chosen over disk",
+     "With cuda not usable (no server GPU), the canonical order picks http over disk. This proves negotiation respects the real preference (http preferred to disk; disk is the debug/traceable transport), not an alphabetical default.",
+     "cuda,disk,http", "disk,http", "disk,http", "cuda,http,disk", true, "http"},
+    {"soft-debug-mask-forces-disk", "Debug mode: client masks cuda+http from its capabilities — disk chosen",
+     "To trace a dataflow over an easily-inspectable transport, the client masks cuda and http from its own reachable set, leaving disk the only usable transport. Confirms a client can narrow its capabilities to force a transport.",
+     "cuda,disk,http", "cuda,disk,http", "disk", "cuda,http,disk", true, "disk"},
 };
 
 const char* const kSpecHard = "notch_contract_matrix_spec.md §4 hard selection (A1 n A2 n A3, hard request)";
@@ -170,11 +185,11 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
     options.m_clientReachableTransports = Split(row.clientReachable);
     if (soft)
     {
-        options.m_preferenceOrder = Split(row.requestedOrOrder);
+        options.m_preferenceOrder = Split(row.requiredOrPreference);
     }
     else
     {
-        options.m_preferredTransport = row.requestedOrOrder;
+        options.m_requiredTransport = row.requiredOrPreference;
     }
 
     notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(options);
@@ -189,12 +204,17 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
     rec.specRef = soft ? kSpecSoft : kSpecHard;
     if (soft)
     {
-        rec.preferredOrder = Split(row.requestedOrOrder);
+        rec.preferredOrder = Split(row.requiredOrPreference);
     }
     else
     {
-        rec.requestedTransport = row.requestedOrOrder;
+        rec.requiredTransport = row.requiredOrPreference;
     }
+    std::ostringstream fixture;
+    fixture << "{\"type_allowed\":" << CaseLogger::Array(Split(row.typeAllowed))
+            << ",\"server_available\":" << CaseLogger::Array(Split(row.serverAvailable))
+            << ",\"client_reachable\":" << CaseLogger::Array(Split(row.clientReachable)) << "}";
+    rec.fixtureJson = fixture.str();
     rec.expectedJson = ExpectJson(row.expectOk, row.expectTransport);
     rec.actualJson = ChoiceJson(choice);
     rec.result = ok ? "pass" : "fail";

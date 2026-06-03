@@ -97,8 +97,8 @@ int main()
     std::printf("stub matrix: pass=%d fail=%d skip=%d error=%d\n",
                 summary.passed, summary.failed, summary.skipped, summary.errored);
 
-    // 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 2 soft + 1 ws = 18.
-    if (!summary.Ok() || summary.passed != 18 || summary.failed != 0)
+    // 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 3 soft + 1 ws = 19.
+    if (!summary.Ok() || summary.passed != 19 || summary.failed != 0)
     {
         std::printf("stub matrix self-test FAILED\n");
         return 1;

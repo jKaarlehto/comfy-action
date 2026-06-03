@@ -20,8 +20,9 @@ struct CaseRecord
     std::string description;  // why this case exists, in prose
     std::string specRef;      // pointer into docs/notch_contract_matrix_spec.md
     // Transport-selection cases set exactly one of these to describe the request:
-    std::string requestedTransport;          // single required transport (never downgraded)
+    std::string requiredTransport;           // single required transport (never downgraded)
     std::vector<std::string> preferredOrder; // ordered preference (first usable wins)
+    std::string fixtureJson;                 // selection inputs (type/server/client sets), or empty
     std::string expectedJson;                // compact JSON fragment, or empty -> null
     std::string actualJson;                  // compact JSON fragment, or empty -> null
     std::string result;                      // pass | fail | skip | error

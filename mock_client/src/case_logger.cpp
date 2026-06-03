@@ -75,13 +75,17 @@ void CaseLogger::WriteCase(const CaseRecord& record)
          << "\"phase\":" << Quote(record.phase) << ","
          << "\"description\":" << Quote(record.description) << ","
          << "\"spec_ref\":" << Quote(record.specRef) << ",";
-    if (!record.requestedTransport.empty())
+    if (!record.requiredTransport.empty())
     {
-        json << "\"requested_transport\":" << Quote(record.requestedTransport) << ",";
+        json << "\"required_transport\":" << Quote(record.requiredTransport) << ",";
     }
     if (!record.preferredOrder.empty())
     {
         json << "\"preferred_order\":" << Array(record.preferredOrder) << ",";
+    }
+    if (!record.fixtureJson.empty())
+    {
+        json << "\"fixture\":" << record.fixtureJson << ",";
     }
     json << "\"expected\":" << (record.expectedJson.empty() ? "null" : record.expectedJson) << ","
          << "\"actual\":" << (record.actualJson.empty() ? "null" : record.actualJson) << ","
