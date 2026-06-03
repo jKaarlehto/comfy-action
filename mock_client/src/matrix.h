@@ -31,11 +31,10 @@ public:
     virtual ~ICudaShareReader() {}
     // Whether this environment has a usable CUDA driver + device (cuInit + a
     // device present). No device -> skip (cuda_unavailable). CUDA delivery has a
-    // second skip gate, cuda_ipc_unsupported: a verified-valid share whose handle
-    // the platform cannot import (e.g. WSL2 GPU-PV rejects it from both the
-    // runtime and driver open APIs). With a device present AND IPC supported, a
-    // failed import is a real failure (e.g. a wrong handle), not a skip. error
-    // carries the driver reason when unavailable.
+    // second skip gate, cuda_ipc_unsupported: a verified-valid share whose
+    // handle a WSL-marked runner cannot import. With a device present on a normal
+    // runner, a failed import is a real failure (e.g. a wrong handle), not a
+    // skip. error carries the driver reason when unavailable.
     virtual bool CudaAvailable(std::string& error) = 0;
     virtual bool ReadShare(
         const notch_comfy::CudaShareStatus& share,

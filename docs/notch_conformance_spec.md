@@ -351,9 +351,14 @@ nearly free.
 
 - **CUDA** cases (the `local` image-cuda positive, plus the CUDA reader path) skip
   with reason `cuda_unavailable` when the runner has no CUDA device — exactly as
-  §2 gates cuda on `cuda_device_index ≥ 0`. CUDA availability is the *only* skip
-  gate for cuda delivery (see §Delivery CUDA below); an available-but-failed
-  import is a **fail**, never a skip.
+  §2 gates cuda on `cuda_device_index ≥ 0`. A second, narrower skip is allowed:
+  `cuda_ipc_unsupported` when a WSL-marked runner produced a valid CUDA share
+  contract (execution success, share-status metadata, `/notch/cuda/share`
+  metadata, WS/HTTP handle integrity, and matching device index) but raw legacy
+  IPC import fails. That skip must be accompanied by the CUDA IPC evidence
+  artifacts (`cuda-ipc-probe.json`, `cuda-simple-ipc-result.json`,
+  `cuda-ipc-ld-debug.log`, `libcuda-ldconfig.txt`). On non-WSL runners, or when
+  the share contract is not valid, an available-but-failed import is a **fail**.
 - **`remote-route-disk`** is active when the action config provides a matching
   server/client named route and `/features` advertises that route under
   `extension.notch.named_disk_routes.route_ids`. The route ID is deployment

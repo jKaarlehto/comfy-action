@@ -18,7 +18,7 @@
 // actually honors:
 //   - runtime open succeeds  -> the production pairing works here
 //   - driver open succeeds   -> the platform needs a matched driver-open
-//   - both fail              -> the platform has no usable CUDA IPC at all
+//   - both fail              -> this runner could not import this legacy IPC handle
 // The winning path is printed to stdout (captured in mock-client.log); when
 // both fail, both driver reasons are returned in `error`.
 

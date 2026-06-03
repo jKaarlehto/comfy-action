@@ -29,7 +29,10 @@ discovery + transport-negotiation + readiness-decision cases (Layer 1).
 `NotchSingleInput -> execute -> NotchOutputNode -> disk/http/cuda -> verify`.
 Disk and HTTP compare exact SHA-256 bytes for a file-path artifact. CUDA uses a
 deterministic raw-buffer IMAGE input and hashes the imported CUDA shared buffer
-when CUDA and the CUDA reader are available.
+when CUDA and the CUDA reader are available. The job also records CUDA IPC
+evidence (`cuda-ipc-probe.json`, `cuda-simple-ipc-result.json`,
+`libcuda-ldconfig.txt`, `cuda-ipc-ld-debug.log`) so a WSL2/Docker runner can
+distinguish a broken Notch share contract from a raw platform IPC import failure.
 
 `mode: delivery_remote` runs a two-container topology: a ComfyUI server
 container plus a mock-client container on a private Docker network. It verifies
@@ -118,6 +121,13 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `python-env.json`
 - `pip-freeze.txt`
 - `server-feature-flags.json`
+- `cuda-diagnostics.json`
+- `cuda-ipc-probe.json`
+- `cuda-simple-ipc-result.json`
+- `cuda-ipc-probe.log`
+- `cuda-simple-ipc.log`
+- `cuda-ipc-ld-debug.log`
+- `libcuda-ldconfig.txt`
 - `object-info-summary.json`
 - `object-info-debug.json` when node discovery fails
 - `extension-boot-result.json`

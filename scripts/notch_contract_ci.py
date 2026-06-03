@@ -488,15 +488,13 @@ def _render_cuda_summary(diag: dict[str, Any]) -> str:
 
 
 def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: str = "container") -> dict[str, Any]:
-    """Capture CUDA + IPC/cgroup launch facts and assert the container was launched
-    with the namespace sharing CUDA IPC needs on WSL2 GPU-PV.
+    """Capture CUDA + IPC/cgroup launch facts for CUDA IPC troubleshooting.
 
-    On WSL2 GPU-PV, cudaIpcOpenMemHandle is backed by host-level IPC primitives, so
-    it only works when the container shares the host IPC namespace (--ipc=host).
-    The display driver (host-mapped into the container) must also be >= R510 for
-    legacy CUDA IPC. These are *host* facts observed from inside the container;
-    asserting them in the job means a launch-script regression that drops
-    --ipc=host or --cgroupns=host is caught here, not as a silent CUDA failure.
+    NVIDIA's WSL guidance gives R510 as the broad legacy-CUDA-IPC floor, but it
+    does not prove this exact Docker Desktop / WSL2 GPU-PV topology can import a
+    memory handle. These diagnostics verify the runner did not silently drop the
+    namespace flags we intentionally pass, then the CUDA IPC probe records the
+    raw import behavior as evidence.
 
     The launch script passes the host PID-1 namespace inodes (HOST_IPC_NS /
     HOST_CGROUP_NS) from a --pid=host probe; when present the checks are exact —
@@ -508,6 +506,14 @@ def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: 
     nvidia_smi = command_text(["nvidia-smi"])
     diag["nvidia_smi"] = nvidia_smi
     diag["driver_version"] = _parse_driver_version(nvidia_smi)
+    diag["libcuda_ldconfig"] = command_text(
+        ["bash", "-lc", "ldconfig -p | grep -E 'libcuda\\.so|libcudart\\.so' || true"]
+    )
+    diag["nvidia_container_cli"] = command_text(["nvidia-container-cli", "-V"])
+    diag["wsl_version"] = command_text(["wsl.exe", "--version"]) or command_text(["wsl", "--version"])
+    (artifacts / "libcuda-ldconfig.txt").write_text(diag["libcuda_ldconfig"] + "\n", encoding="utf-8")
+    (artifacts / "nvidia-container-cli.txt").write_text(diag["nvidia_container_cli"] + "\n", encoding="utf-8")
+    (artifacts / "wsl-version.txt").write_text(diag["wsl_version"] + "\n", encoding="utf-8")
 
     def _readlink(path: str) -> str:
         try:
@@ -553,7 +559,7 @@ def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: 
             {
                 "name": "driver_supports_legacy_cuda_ipc",
                 "ok": driver_major >= 510,
-                "detail": f"host display driver {driver} (legacy CUDA IPC needs >= R510)",
+                "detail": f"host display driver {driver} (WSL legacy CUDA IPC documented floor is R510; not a topology guarantee)",
             }
         )
 
@@ -648,6 +654,126 @@ def command_text(command: list[str]) -> str:
     except FileNotFoundError:
         return ""
     return (result.stdout + result.stderr).strip()
+
+
+def collect_official_simple_ipc_sample(runner: CommandRunner, artifacts: Path) -> dict[str, Any]:
+    """Run NVIDIA's simpleIPC sample when the CUDA samples are present.
+
+    The CUDA devel images usually do not include sample source, so this is an
+    opportunistic datapoint. Absence is recorded as a skip artifact, not a
+    failure.
+    """
+
+    script = r"""
+set -u
+sample_dir=""
+for candidate in \
+  /usr/local/cuda/samples/0_Simple/simpleIPC \
+  /usr/local/cuda/samples/Samples/0_Introduction/simpleIPC \
+  /usr/local/cuda-*/samples/0_Simple/simpleIPC \
+  /usr/local/cuda-*/samples/Samples/0_Introduction/simpleIPC
+do
+  if [ -d "$candidate" ]; then
+    sample_dir="$candidate"
+    break
+  fi
+done
+if [ -z "$sample_dir" ]; then
+  echo "simpleIPC sample source not found under /usr/local/cuda*/samples"
+  exit 0
+fi
+echo "simpleIPC directory: $sample_dir"
+cd "$sample_dir" || exit 2
+if [ -f Makefile ]; then
+  make clean || true
+  make || exit $?
+fi
+if [ ! -x ./simpleIPC ]; then
+  echo "./simpleIPC not found or not executable"
+  exit 2
+fi
+./simpleIPC
+"""
+    run = runner.run(["bash", "-lc", script], log_name="cuda-simple-ipc.log", check=False)
+    available = "simpleIPC sample source not found" not in run.stdout
+    result = {
+        "schema_version": 1,
+        "probe": "nvidia_simpleIPC",
+        "available": available,
+        "returncode": run.returncode,
+        "log": "cuda-simple-ipc.log",
+        "note": "sample is run as ./simpleIPC when source is available",
+    }
+    if not available:
+        result["result"] = "skip"
+        result["reason"] = "sample_source_not_found"
+    else:
+        result["result"] = "pass" if run.returncode == 0 else "fail"
+    write_json(artifacts / "cuda-simple-ipc-result.json", result)
+    if available and run.returncode != 0:
+        emit_annotation("warning", "CUDA simpleIPC", "NVIDIA simpleIPC failed; see cuda-simple-ipc.log")
+    return result
+
+
+def collect_cuda_ipc_probe(runner: CommandRunner, mock_exe: Path, artifacts: Path) -> dict[str, Any]:
+    """Run the pure C++ same-container CUDA IPC repro built with the mock client.
+
+    The probe is diagnostic evidence only. The delivery matrix decides whether
+    the actual Notch CUDA round trip passes, fails, or is skipped as a platform
+    limitation.
+    """
+
+    exe_name = "notch_cuda_ipc_probe.exe" if os.name == "nt" else "notch_cuda_ipc_probe"
+    probe = mock_exe.parent / exe_name
+    if not probe.exists():
+        result = {
+            "schema_version": 1,
+            "probe": "notch_cuda_ipc_probe",
+            "available": False,
+            "result": "skip",
+            "reason": "probe_not_built",
+            "detail": "CUDAToolkit was not found by CMake, or this platform is not supported by the probe",
+        }
+        write_json(artifacts / "cuda-ipc-probe.json", result)
+        return result
+
+    ld_debug_command = (
+        "LD_DEBUG=libs "
+        + shlex.quote(str(probe))
+        + " 2>&1 | grep -E 'libcuda|libcudart' | head -80 || true"
+    )
+    runner.run(["bash", "-lc", ld_debug_command], log_name="cuda-ipc-ld-debug.log", check=False)
+
+    run = runner.run([str(probe)], log_name="cuda-ipc-probe.log", check=False)
+    parsed: dict[str, Any]
+    try:
+        parsed = json.loads(run.stdout.strip().splitlines()[-1])
+    except Exception:
+        parsed = {
+            "schema_version": 1,
+            "probe": "notch_cuda_ipc_probe",
+            "result": "error",
+            "parse_error": "probe did not print JSON on its final stdout line",
+        }
+    parsed["available"] = True
+    parsed["returncode"] = run.returncode
+    parsed["log"] = "cuda-ipc-probe.log"
+    parsed["ld_debug_log"] = "cuda-ipc-ld-debug.log"
+    write_json(artifacts / "cuda-ipc-probe.json", parsed)
+    if parsed.get("result") == "fail":
+        emit_annotation(
+            "warning",
+            "CUDA IPC probe",
+            "Pure C++ same-container CUDA IPC repro failed; see cuda-ipc-probe.json",
+        )
+    elif parsed.get("result") == "error":
+        emit_annotation("warning", "CUDA IPC probe", "Probe did not complete cleanly; see cuda-ipc-probe.log")
+    return parsed
+
+
+def collect_cuda_ipc_evidence(runner: CommandRunner, mock_exe: Path, artifacts: Path) -> None:
+    collect_official_simple_ipc_sample(runner, artifacts)
+    collect_cuda_ipc_probe(runner, mock_exe, artifacts)
 
 
 def start_comfy_server(
@@ -1013,6 +1139,9 @@ def main() -> int:
                 write_json(artifacts / result_filename, result)
                 emit_annotation("error", "Mock client build", f"{exc.code}: {exc}")
                 return 1
+
+            if mode == "delivery_local":
+                collect_cuda_ipc_evidence(runner, mock_exe, artifacts)
 
             fixtures = find_mock_client_dir() / "fixtures"
             mock_command = [

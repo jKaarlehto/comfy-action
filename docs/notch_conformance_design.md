@@ -189,7 +189,9 @@ adapters and orchestration needed by CI:
 - HTTP requests to `/notch/parse`, `/notch/inject`, and artifact GET routes.
 - WebSocket reads for Comfy execution lifecycle, `notch-output-ready`, and
   `notch-cuda-share-status`.
-- Optional CUDA Driver IPC import for CUDA-positive local delivery cases.
+- CUDA runtime IPC import for CUDA-positive local delivery cases, with driver
+  API fallback and a separate same-container CUDA IPC probe for platform
+  evidence.
 - Local output validation and artifact writing for CI evidence.
 
 Keep this mock client in the action/test harness, not in
@@ -410,7 +412,8 @@ Allowed case results:
 - `pass`: expected and actual behavior match.
 - `fail`: expected and actual behavior differ.
 - `skip`: the case is not applicable to this runner, with an explicit reason
-  such as `cuda_unavailable`.
+  such as `cuda_unavailable` or the WSL-only `cuda_ipc_unsupported` path when a
+  valid CUDA share contract cannot be imported by raw legacy CUDA IPC.
 - `error`: the case could not complete because the harness, server, or client
   encountered an unexpected failure.
 
@@ -531,6 +534,13 @@ pip-freeze.txt
 server-feature-flags.json
 object-info-summary.json
 object-info-debug.json
+cuda-diagnostics.json
+cuda-ipc-probe.json
+cuda-simple-ipc-result.json
+cuda-simple-ipc.log
+libcuda-ldconfig.txt
+cuda-ipc-ld-debug.log
+cuda-ipc-probe.log
 comfyui.log
 git.log
 python-install.log
@@ -547,6 +557,8 @@ compatibility-result.json
 - Container OS, CPU architecture, and Python facts.
 - Host GPU visibility inside the container, including `nvidia-smi` output when
   available.
+- CUDA driver/library resolution evidence (`ldconfig`, `nvidia-container-cli`,
+  and WSL version when visible from the container).
 - Torch, TorchVision, and Torchaudio versions when installed.
 - Torch CUDA availability and CUDA version reported by Torch.
 - cuda-python import availability when installed.

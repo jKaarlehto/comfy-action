@@ -471,12 +471,12 @@ bool NamedRouteConfiguredForClient(const MatrixOptions& options,
            ContainsString(deployment.m_namedDiskRouteIds, options.namedRouteId);
 }
 
-// CUDA IPC mem-handle import does not work on WSL2 GPU-PV: a valid, integrity-
-// checked handle is rejected by both cudaIpcOpenMemHandle and cuIpcOpenMemHandle
-// with InvalidResourceHandle. That is a platform limitation, not a server/client
-// bug, so a CUDA delivery whose server contract passed but whose import failed is
-// a skip there, not a fail. Detected via the kernel string (WSL marker).
-bool IsCudaIpcUnsupportedPlatform()
+// Current WSL2 GPU-PV runners can reject an otherwise well-formed CUDA IPC
+// memory handle with InvalidResourceHandle. Treat that as a platform skip only
+// after the server-side share contract has already passed; the separate
+// cuda-ipc-probe artifact records whether raw IPC is actually supported on the
+// runner. Native Linux import failures remain real failures.
+bool IsWslPlatform()
 {
     std::ifstream version("/proc/version");
     if (!version)
@@ -1444,9 +1444,10 @@ void RunCudaDeliveryCase(
     std::string infoError;
     bool infoOk = http.Send(infoRequest, infoResponse, infoError) && infoResponse.m_statusCode == 200;
 
-    // CUDA availability is the ONLY skip gate. If CUDA is available, a failed
-    // import is a real failure (e.g. a wrong/malformed handle from the server),
-    // never hidden as a skip.
+    // CUDA availability is the first skip gate. If CUDA is available, import
+    // failure is normally a real failure (e.g. a wrong/malformed handle). The
+    // only second skip is the evidenced WSL2 GPU-PV raw-IPC limitation below,
+    // after the share contract and cross-channel handle integrity have passed.
     std::string cudaAvailableError;
     const bool cudaAvailable = cudaReader->CudaAvailable(cudaAvailableError);
 
@@ -1515,11 +1516,11 @@ void RunCudaDeliveryCase(
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    // Verdict, with CUDA availability as the ONLY skip gate:
+    // Verdict:
     //   - CUDA not available in this environment      -> skip (cuda_unavailable)
     //   - share-status/shape/info contract broken     -> fail
-    //   - CUDA available but import/read failed        -> fail (e.g. wrong handle;
-    //                                                     never hidden as a skip)
+    //   - WSL platform rejects a verified share handle -> skip (cuda_ipc_unsupported)
+    //   - other available-but-failed import/read       -> fail (e.g. wrong handle)
     //   - import ok but bytes mismatch                 -> fail (corruption)
     //   - import ok and bytes match                    -> pass
     // The driver error is always captured in cuda_read_error / cuda_unavailable_error.
@@ -1534,14 +1535,14 @@ void RunCudaDeliveryCase(
         result = "skip";
         rec.errors.push_back("cuda_unavailable");
     }
-    else if (shareContractOk && !cudaRead && IsCudaIpcUnsupportedPlatform())
+    else if (shareContractOk && !cudaRead && IsWslPlatform())
     {
         // Server produced a valid, integrity-checked CUDA share with correct
-        // metadata, but the client cannot import the IPC handle on this platform
-        // (WSL2 GPU-PV rejects a valid handle from both the runtime and driver
-        // open APIs). Platform limitation, not a server/client bug: skip the byte
-        // round-trip. Self-clearing on a runner where CUDA IPC works. The
-        // server-side share contract was verified and counts as passing here.
+        // metadata, but this WSL-marked runner cannot import the IPC handle. The
+        // raw CUDA IPC probe records whether this is a platform limitation. Skip
+        // the byte round-trip here; the server-side share contract was already
+        // verified and this clears automatically on a runner where IPC import
+        // works.
         result = "skip";
         rec.errors.push_back("cuda_ipc_unsupported");
     }

@@ -64,6 +64,11 @@ if(CUDAToolkit_FOUND)
     # reader's fallback open when the runtime open returns InvalidResourceHandle.
     target_link_libraries(notch_mock_client PRIVATE CUDA::cudart CUDA::cuda_driver)
     target_compile_definitions(notch_mock_client PRIVATE NOTCH_MOCK_HAS_CUDA_RUNTIME=1)
+
+    if(UNIX)
+        add_executable(notch_cuda_ipc_probe src/tools/cuda_ipc_probe.cpp)
+        target_link_libraries(notch_cuda_ipc_probe PRIVATE CUDA::cudart CUDA::cuda_driver)
+    endif()
 endif()
 
 # Transport-agnostic self-test: exercises the matrix with stub transports, no
