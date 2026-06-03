@@ -1,8 +1,10 @@
 #include "matrix.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 namespace notch_mock
 {
@@ -140,11 +142,13 @@ const SelectionRow kSoftRows[] = {
      "cuda,disk,http", "cuda,disk,http", "disk", "cuda,http,disk", true, "disk"},
 };
 
-const char* const kSpecHard = "notch_contract_matrix_spec.md §4 hard selection (A1 n A2 n A3, hard request)";
-const char* const kSpecSoft = "notch_contract_matrix_spec.md §4 soft selection (A4 preference order)";
-const char* const kSpecTypeAxis = "notch_contract_matrix_spec.md §4 type-axis discovery (A1)";
-const char* const kSpecReadiness = "notch_contract_matrix_spec.md §4 deployment-readiness decision (A5)";
-const char* const kSpecLiveness = "notch_contract_matrix_spec.md §4 setup/liveness (A0)";
+const char* const kSpecHard = "notch_conformance_spec.md §4 hard selection (A1 n A2 n A3, hard request)";
+const char* const kSpecSoft = "notch_conformance_spec.md §4 soft selection (A4 preference order)";
+const char* const kSpecTypeAxis = "notch_conformance_spec.md §4 type-axis discovery (A1)";
+const char* const kSpecReadiness = "notch_conformance_spec.md §4 deployment-readiness decision (A5)";
+const char* const kSpecLiveness = "notch_conformance_spec.md §4 setup/liveness (A0)";
+const char* const kSpecExecution = "notch_conformance_spec.md §9a execution lifecycle (WS terminal event)";
+const char* const kSpecFileAvailability = "notch_conformance_spec.md §9 file-availability enforcement (A5 runtime)";
 
 } // namespace
 
@@ -158,7 +162,9 @@ public:
     {
     }
 
-    void Record(CaseRecord record)
+    // Records the case and returns its assigned index, so callers can attach
+    // per-case evidence files (diagnostics, websocket frames, server.log slice).
+    int Record(CaseRecord record)
     {
         record.index = ++m_index;
         if (record.result == "pass") ++m_summary.passed;
@@ -166,6 +172,7 @@ public:
         else if (record.result == "skip") ++m_summary.skipped;
         else ++m_summary.errored;
         m_logger.WriteCase(record);
+        return record.index;
     }
 
 private:
@@ -292,13 +299,229 @@ void RunReadinessCase(
     recorder.Record(rec);
 }
 
-void WriteResultFile(const std::string& outputRoot, const MatrixSummary& summary)
+long FileSize(const std::string& path)
+{
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f)
+    {
+        return -1;
+    }
+    return static_cast<long>(f.tellg());
+}
+
+std::string ReadFileSlice(const std::string& path, long start, long end)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f || start < 0 || end <= start)
+    {
+        return "";
+    }
+    f.seekg(start);
+    std::string buffer(static_cast<size_t>(end - start), '\0');
+    f.read(&buffer[0], end - start);
+    buffer.resize(static_cast<size_t>(f.gcount()));
+    return buffer;
+}
+
+// Delivery-phase case: submit a workflow with execute=true, wait for the matching
+// terminal WS event by prompt_id, and assert the run outcome. For expectSuccess
+// the run must reach execution_success; otherwise (file-availability enforcement)
+// the run must be blocked — rejected at inject (not queued) or terminated with
+// execution_error/interrupted — and must NOT succeed. Writes per-case evidence:
+// the websocket frames, the server.log slice for the run, and the Notch
+// diagnostics captured under this prompt_id.
+void RunExecutionCase(
+    CaseRecorder& recorder,
+    notch_comfy::IHttpTransport& http,
+    IWebSocketProbe& ws,
+    CaseLogger& logger,
+    const MatrixOptions& options,
+    const std::string& caseId,
+    const std::string& title,
+    const std::string& description,
+    const std::string& workflowJson,
+    bool expectSuccess)
+{
+    CaseRecord rec;
+    rec.caseId = caseId;
+    rec.title = title;
+    rec.phase = expectSuccess ? "execution" : "delivery";
+    rec.description = description;
+    rec.specRef = expectSuccess ? kSpecExecution : kSpecFileAvailability;
+    rec.expectedJson = expectSuccess ? "{\"terminal\":\"execution_success\"}"
+                                     : "{\"blocked\":true}";
+
+    const std::string serverLog = options.outputRoot + "/comfyui.log";
+    const long logStart = FileSize(serverLog);
+
+    std::string wsError;
+    if (!ws.Connect(options.wsTimeoutMs, wsError))
+    {
+        rec.result = "error";
+        rec.actualJson = "{\"connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
+        rec.errors.push_back("websocket_timeout");
+        recorder.Record(rec);
+        return;
+    }
+
+    notch_comfy::WorkflowSubmissionRequest req;
+    req.m_workflowJson = workflowJson;
+    req.m_clientId = options.clientId;
+    req.m_execute = true;
+    req.m_broadcastWs = true;
+    notch_comfy::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
+    if (!built.m_ok)
+    {
+        ws.Close();
+        rec.result = "error";
+        rec.actualJson = "{\"build_error\":" + CaseLogger::Quote(built.m_error) + "}";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
+        return;
+    }
+
+    notch_comfy::HttpResponse injectResponse;
+    std::string sendError;
+    if (!http.Send(built.m_request, injectResponse, sendError))
+    {
+        ws.Close();
+        rec.result = "error";
+        rec.actualJson = "{\"inject_error\":" + CaseLogger::Quote(sendError) + "}";
+        rec.errors.push_back("harness_error");
+        recorder.Record(rec);
+        return;
+    }
+
+    notch_comfy::WorkflowSubmissionResult submission;
+    std::string parseError;
+    const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
+    const bool queued = parsed && submission.m_queued;
+    const std::string promptId = submission.m_promptId;
+
+    // Wait for the terminal WS event matching this prompt_id (only if queued).
+    std::vector<std::string> frames;
+    std::string terminalType;
+    bool terminalSuccess = false;
+    if (queued)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options.executeTimeoutMs);
+        bool terminal = false;
+        while (!terminal && std::chrono::steady_clock::now() < deadline)
+        {
+            std::vector<std::string> batch = ws.DrainReceived();
+            for (size_t i = 0; i < batch.size(); ++i)
+            {
+                frames.push_back(batch[i]);
+                notch_comfy::WebSocketEvent event;
+                std::string evError;
+                if (!ClientProtocol::ParseWebSocketEvent(batch[i], event, evError))
+                {
+                    continue;
+                }
+                if (!event.m_promptId.empty() && event.m_promptId != promptId)
+                {
+                    continue;
+                }
+                if (event.m_kind == notch_comfy::EventExecutionSuccess)
+                {
+                    terminalType = "execution_success";
+                    terminalSuccess = true;
+                    terminal = true;
+                    break;
+                }
+                if (event.m_kind == notch_comfy::EventExecutionError ||
+                    event.m_kind == notch_comfy::EventExecutionInterrupted)
+                {
+                    terminalType = event.m_type;
+                    terminal = true;
+                    break;
+                }
+            }
+            if (!terminal)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+    ws.Close();
+
+    // Decide the verdict.
+    const bool blocked = !queued || (!terminalType.empty() && !terminalSuccess);
+    bool ok;
+    if (expectSuccess)
+    {
+        ok = terminalSuccess;
+        if (!ok)
+        {
+            rec.errors.push_back(queued ? (terminalType.empty() ? "websocket_timeout" : "execution_error")
+                                        : "unexpected_reject");
+        }
+    }
+    else
+    {
+        ok = blocked;
+        if (!ok)
+        {
+            rec.errors.push_back("unexpected_accept");
+        }
+    }
+
+    std::ostringstream actual;
+    actual << "{\"queued\":" << CaseLogger::Bool(queued)
+           << ",\"prompt_id\":" << CaseLogger::Quote(promptId)
+           << ",\"terminal\":" << CaseLogger::Quote(terminalType)
+           << ",\"blocked\":" << CaseLogger::Bool(blocked);
+    if (!queued && !submission.m_error.empty())
+    {
+        actual << ",\"inject_error\":" << CaseLogger::Quote(submission.m_error);
+    }
+    actual << "}";
+    rec.actualJson = actual.str();
+    rec.result = ok ? "pass" : "fail";
+
+    const int index = recorder.Record(rec);
+
+    // Per-case evidence: WS frames, the server.log slice for this run, and the
+    // Notch diagnostics captured under this prompt_id (context, not pass/fail).
+    if (!frames.empty())
+    {
+        std::string wsLog;
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            wsLog += frames[i];
+            wsLog += "\n";
+        }
+        logger.AppendCaseFile(index, caseId, "websocket.jsonl", wsLog);
+    }
+    const long logEnd = FileSize(serverLog);
+    const std::string slice = ReadFileSlice(serverLog, logStart, logEnd);
+    if (!slice.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "server.log", slice);
+    }
+    if (!promptId.empty())
+    {
+        notch_comfy::HttpRequest diagRequest;
+        diagRequest.m_method = "GET";
+        diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
+        diagRequest.m_contentType = "application/json";
+        notch_comfy::HttpResponse diagResponse;
+        std::string diagError;
+        if (http.Send(diagRequest, diagResponse, diagError) && !diagResponse.m_body.empty())
+        {
+            logger.AppendCaseFile(index, caseId, "notch-diagnostics.json",
+                                  CaseLogger::PrettyPrint(diagResponse.m_body) + "\n");
+        }
+    }
+}
+
+void WriteResultFile(const std::string& outputRoot, const std::string& phaseName, const MatrixSummary& summary)
 {
     std::ostringstream json;
     json << "{"
          << "\"schema_version\":1,"
-         << "\"profile\":\"contract_matrix\","
-         << "\"phase\":\"matrix_v1\","
+         << "\"profile\":\"conformance\","
+         << "\"phase\":" << CaseLogger::Quote(phaseName) << ","
          << "\"result\":" << CaseLogger::Quote(summary.Ok() ? "pass" : "fail") << ","
          << "\"totals\":{"
          << "\"pass\":" << summary.passed << ","
@@ -311,67 +534,19 @@ void WriteResultFile(const std::string& outputRoot, const MatrixSummary& summary
     }
     json << "}";
 
-    std::ofstream stream(outputRoot + "/contract-matrix-result.json");
+    std::ofstream stream(outputRoot + "/conformance-result.json");
     stream << CaseLogger::PrettyPrint(json.str()) << "\n";
 }
 
-} // namespace
-
-MatrixSummary RunMatrixV1(
+// Negotiation phase (Layer 1): discovery, readiness decision, the pure
+// transport-selection matrix, and the WS handshake smoke. No execution.
+void RunNegotiationCases(
+    CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
-    CaseLogger& logger)
+    const notch_comfy::ServerCompatibilityFacts& serverCompat)
 {
-    MatrixSummary summary;
-    CaseRecorder recorder(logger, summary);
-
-    // 1. Record the linked-against client interface facts. A version that
-    //    disagrees with the checked-out extension is then diagnosable offline.
-    notch_comfy::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
-    {
-        std::ostringstream json;
-        json << "{\"record\":\"client_compatibility_facts\""
-             << ",\"interface_version\":" << CaseLogger::Quote(clientFacts.m_clientInterfaceVersion)
-             << ",\"wire_protocol_version\":" << clientFacts.m_wireProtocolVersion
-             << ",\"minimum_server_wire_protocol_version\":" << clientFacts.m_minimumServerWireProtocolVersion
-             << ",\"source_git_commit\":" << CaseLogger::Quote(clientFacts.m_sourceGitCommit)
-             << ",\"source_git_tag\":" << CaseLogger::Quote(clientFacts.m_sourceGitTag) << "}";
-        logger.Event(json.str());
-    }
-
-    // 2. Shared setup: live GET /features must be reachable and parseable.
-    notch_comfy::HttpResponse featuresResponse;
-    std::string transportError;
-    if (!http.Send(ClientProtocol::BuildServerFeaturesRequest(), featuresResponse, transportError))
-    {
-        summary.setupFailureCode = "harness_error";
-        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_request\",\"error\":" + CaseLogger::Quote(transportError) + "}");
-        WriteResultFile(options.outputRoot, summary);
-        return summary;
-    }
-
-    notch_comfy::ServerCompatibilityFacts serverCompat;
-    notch_comfy::ServerDeploymentFacts deployment;
-    std::string parseError;
-    if (!ClientProtocol::ParseServerCompatibilityFacts(featuresResponse.m_body, serverCompat, parseError) ||
-        !ClientProtocol::ParseServerDeploymentFacts(featuresResponse.m_body, deployment, parseError))
-    {
-        summary.setupFailureCode = "harness_error";
-        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_parse\",\"error\":" + CaseLogger::Quote(parseError) + "}");
-        WriteResultFile(options.outputRoot, summary);
-        return summary;
-    }
-    {
-        std::ostringstream json;
-        json << "{\"record\":\"server_facts\""
-             << ",\"wire_protocol_version\":" << serverCompat.m_wireProtocolVersion
-             << ",\"minimum_client_wire_protocol_version\":" << serverCompat.m_minimumClientWireProtocolVersion
-             << ",\"output_transports\":" << CaseLogger::Array(deployment.m_outputTransports)
-             << ",\"cuda_device_index\":" << deployment.m_cudaDeviceIndex << "}";
-        logger.Event(json.str());
-    }
-
     // 3. Server wire-protocol compatibility.
     notch_comfy::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
     {
@@ -553,9 +728,138 @@ MatrixSummary RunMatrixV1(
             recorder.Record(rec);
         }
     }
+}
+
+// Delivery phase (Layer 2): execute a model-free workflow and assert the terminal
+// WS event, and enforce file-availability (a workflow referencing a missing file
+// must be blocked, not run). Each case attaches per-case diagnostics + evidence.
+void RunDeliveryCases(
+    CaseRecorder& recorder,
+    notch_comfy::IHttpTransport& http,
+    IWebSocketProbe& ws,
+    const MatrixOptions& options,
+    CaseLogger& logger)
+{
+    if (options.executeWorkflowJson.empty())
+    {
+        CaseRecord rec;
+        rec.caseId = "execution-success";
+        rec.title = "Execution skipped (no execute workflow fixture)";
+        rec.phase = "execution";
+        rec.description = "No model-free execute workflow fixture was supplied, so the execution lifecycle was not exercised.";
+        rec.specRef = kSpecExecution;
+        rec.actualJson = "{\"reason\":\"no_execute_workflow\"}";
+        rec.result = "skip";
+        recorder.Record(rec);
+    }
+    else
+    {
+        RunExecutionCase(recorder, http, ws, logger, options, "execution-success",
+            "Model-free workflow executes to execution_success",
+            "Submit a model-free workflow with execute=true and wait for the terminal WS event; it must reach execution_success.",
+            options.executeWorkflowJson, /*expectSuccess=*/true);
+    }
+
+    if (options.executeMissingFileJson.empty())
+    {
+        CaseRecord rec;
+        rec.caseId = "file-availability-blocked";
+        rec.title = "File-availability enforcement skipped (no missing-file fixture)";
+        rec.phase = "delivery";
+        rec.description = "No missing-file execute workflow fixture was supplied, so runtime file-availability enforcement was not exercised.";
+        rec.specRef = kSpecFileAvailability;
+        rec.actualJson = "{\"reason\":\"no_missing_file_workflow\"}";
+        rec.result = "skip";
+        recorder.Record(rec);
+    }
+    else
+    {
+        RunExecutionCase(recorder, http, ws, logger, options, "file-availability-blocked",
+            "Workflow referencing a missing file is blocked, not run",
+            "Submit a workflow whose required file is absent on the server with execute=true; the run must be blocked (rejected at inject or terminated with execution_error) and must not reach execution_success.",
+            options.executeMissingFileJson, /*expectSuccess=*/false);
+    }
+}
+
+const char* PhaseName(Phase phase)
+{
+    switch (phase)
+    {
+    case Phase::Negotiation: return "negotiation";
+    case Phase::Delivery: return "delivery";
+    case Phase::All: return "all";
+    }
+    return "all";
+}
+
+} // namespace
+
+MatrixSummary RunConformance(
+    notch_comfy::IHttpTransport& http,
+    IWebSocketProbe& ws,
+    const MatrixOptions& options,
+    CaseLogger& logger)
+{
+    MatrixSummary summary;
+    CaseRecorder recorder(logger, summary);
+
+    // 1. Record the linked-against client interface facts. A version that
+    //    disagrees with the checked-out extension is then diagnosable offline.
+    notch_comfy::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
+    {
+        std::ostringstream json;
+        json << "{\"record\":\"client_compatibility_facts\""
+             << ",\"interface_version\":" << CaseLogger::Quote(clientFacts.m_clientInterfaceVersion)
+             << ",\"wire_protocol_version\":" << clientFacts.m_wireProtocolVersion
+             << ",\"minimum_server_wire_protocol_version\":" << clientFacts.m_minimumServerWireProtocolVersion
+             << ",\"source_git_commit\":" << CaseLogger::Quote(clientFacts.m_sourceGitCommit)
+             << ",\"source_git_tag\":" << CaseLogger::Quote(clientFacts.m_sourceGitTag) << "}";
+        logger.Event(json.str());
+    }
+
+    // 2. Shared setup: live GET /features must be reachable and parseable.
+    notch_comfy::HttpResponse featuresResponse;
+    std::string transportError;
+    if (!http.Send(ClientProtocol::BuildServerFeaturesRequest(), featuresResponse, transportError))
+    {
+        summary.setupFailureCode = "harness_error";
+        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_request\",\"error\":" + CaseLogger::Quote(transportError) + "}");
+        WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
+        return summary;
+    }
+
+    notch_comfy::ServerCompatibilityFacts serverCompat;
+    notch_comfy::ServerDeploymentFacts deployment;
+    std::string parseError;
+    if (!ClientProtocol::ParseServerCompatibilityFacts(featuresResponse.m_body, serverCompat, parseError) ||
+        !ClientProtocol::ParseServerDeploymentFacts(featuresResponse.m_body, deployment, parseError))
+    {
+        summary.setupFailureCode = "harness_error";
+        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_parse\",\"error\":" + CaseLogger::Quote(parseError) + "}");
+        WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
+        return summary;
+    }
+    {
+        std::ostringstream json;
+        json << "{\"record\":\"server_facts\""
+             << ",\"wire_protocol_version\":" << serverCompat.m_wireProtocolVersion
+             << ",\"minimum_client_wire_protocol_version\":" << serverCompat.m_minimumClientWireProtocolVersion
+             << ",\"output_transports\":" << CaseLogger::Array(deployment.m_outputTransports)
+             << ",\"cuda_device_index\":" << deployment.m_cudaDeviceIndex << "}";
+        logger.Event(json.str());
+    }
+
+    if (options.phase != Phase::Delivery)
+    {
+        RunNegotiationCases(recorder, http, ws, options, serverCompat);
+    }
+    if (options.phase != Phase::Negotiation)
+    {
+        RunDeliveryCases(recorder, http, ws, options, logger);
+    }
 
     logger.WriteIndex();
-    WriteResultFile(options.outputRoot, summary);
+    WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
     return summary;
 }
 

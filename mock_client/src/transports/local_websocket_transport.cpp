@@ -33,7 +33,7 @@ LocalWebSocketTransport::LocalWebSocketTransport(const std::string& url, const s
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_received.push_back(message->str);
-            std::ofstream stream(m_outputRoot + "/contract-matrix/websocket.jsonl", std::ios::app);
+            std::ofstream stream(m_outputRoot + "/conformance/websocket.jsonl", std::ios::app);
             stream << "{\"direction\":\"recv\",\"bytes\":" << message->str.size() << "}\n";
             break;
         }
@@ -74,7 +74,7 @@ bool LocalWebSocketTransport::SendText(const std::string& message, std::string& 
     }
     ix::WebSocketSendInfo info = m_ws.send(message);
     {
-        std::ofstream stream(m_outputRoot + "/contract-matrix/websocket.jsonl", std::ios::app);
+        std::ofstream stream(m_outputRoot + "/conformance/websocket.jsonl", std::ios::app);
         stream << "{\"direction\":\"send\",\"bytes\":" << message.size()
                << ",\"success\":" << CaseLogger::Bool(info.success) << "}\n";
     }

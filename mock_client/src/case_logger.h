@@ -7,7 +7,7 @@
 namespace notch_mock
 {
 
-// One contract-matrix case result, carrying enough self-description to read the
+// One conformance case result, carrying enough self-description to read the
 // artifact without the source: a plain-language title, the phase it belongs to,
 // why it exists, a pointer to the spec it is derived from, and what was
 // requested.
@@ -18,7 +18,7 @@ struct CaseRecord
     std::string title;        // plain one-line summary of what the case checks
     std::string phase;        // liveness | discovery | readiness | transport-selection
     std::string description;  // why this case exists, in prose
-    std::string specRef;      // pointer into docs/notch_contract_matrix_spec.md
+    std::string specRef;      // pointer into docs/notch_conformance_spec.md
     // Transport-selection cases set exactly one of these to describe the request:
     std::string requiredTransport;           // single required transport (never downgraded)
     std::vector<std::string> preferredOrder; // ordered preference (first usable wins)
@@ -29,7 +29,7 @@ struct CaseRecord
     std::vector<std::string> errors;
 };
 
-// CaseLogger writes the contract-matrix evidence tree under a single output
+// CaseLogger writes the conformance evidence tree under a single output
 // root: mock-client.jsonl for run-wide streaming records, one prettified
 // case.json per case, and an INDEX.md human report. The .json files are
 // pretty-printed; the .jsonl streaming log stays one record per line (the JSON
@@ -45,6 +45,11 @@ public:
     // Write cases/<NNN>-<caseId>/case.json (prettified) and remember it for INDEX.md.
     void WriteCase(const CaseRecord& record);
 
+    // Write an extra evidence file into a case's directory (e.g. notch-diagnostics.json,
+    // websocket.jsonl, server.log). Content is written verbatim.
+    void AppendCaseFile(int index, const std::string& caseId, const std::string& filename,
+                        const std::string& content);
+
     // Write INDEX.md: every recorded case grouped by phase with title + result.
     void WriteIndex();
 
@@ -58,7 +63,8 @@ public:
 private:
     std::string m_root;
     std::vector<CaseRecord> m_records;
-    std::string MatrixDir() const;
+    std::string ConformanceDir() const;
+    std::string CaseDir(int index, const std::string& caseId) const;
 };
 
 } // namespace notch_mock

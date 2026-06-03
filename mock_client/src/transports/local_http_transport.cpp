@@ -60,7 +60,7 @@ bool LocalHttpTransport::Send(const notch_comfy::HttpRequest& request,
     }
     record << "}";
 
-    std::ofstream stream(m_outputRoot + "/contract-matrix/http.jsonl", std::ios::app);
+    std::ofstream stream(m_outputRoot + "/conformance/http.jsonl", std::ios::app);
     stream << record.str() << "\n";
 
     return ok;

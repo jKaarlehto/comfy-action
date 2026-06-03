@@ -1,6 +1,6 @@
 # Notch Contract Matrix — Specification and Generation
 
-This is the **source of truth for the contract matrix case set** (test
+This is the **source of truth for the conformance case set** (test
 orchestration the action owns). It names every negotiation axis, its components,
 the counting criterion, and the exact case count, so that:
 
@@ -23,7 +23,7 @@ output-metadata embedding (including `embed_file_manifest`), previews,
 persisted-value load/save, content-addressed cache, replay data, and similar
 `FeaturePolicy` toggles. Those are not transports and not gates; they are
 output-shaping behaviors. They can be added as a separate policy sub-suite later
-*if needed*, but they are not part of this contract matrix and must not inflate
+*if needed*, but they are not part of this conformance suite and must not inflate
 its counts. Note the distinction: the file **manifest** appears here only as the
 readiness **gate** (does the server have the required input files?), never as
 the `embed_file_manifest` output **feature**.
@@ -229,7 +229,7 @@ stub matrix: pass=19 fail=0 skip=0 error=0   ← Layer 1 exact
 
 ### Artifact shape
 
-Each case writes `contract-matrix/cases/NNN-<id>/case.json`, **prettified** and
+Each case writes `conformance/cases/NNN-<id>/case.json`, **prettified** and
 **self-describing**, so the evidence reads without the source:
 
 - `title` — plain one-line summary of what the case checks.
@@ -240,27 +240,38 @@ Each case writes `contract-matrix/cases/NNN-<id>/case.json`, **prettified** and
   downgraded) or `preferred_order` (first usable wins) for selection cases.
 - `expected` vs `actual`, `result`, `errors`.
 
-The run also writes `contract-matrix/INDEX.md` — every case grouped by phase
+The run also writes `conformance/INDEX.md` — every case grouped by phase
 with title + result — as the human entry point. The `.json` files are
 pretty-printed; the run-wide `.jsonl` streaming logs (`mock-client.jsonl`,
 `http.jsonl`, `websocket.jsonl`) stay one record per line (the JSON Lines
 contract — read line by line, not pretty-printed).
 
-## 8. Status vs v2
+## 8. Status — phases and jobs
 
-- **Layer 1 (19):** stub-verified as the contract matrix — all 19 cases run and
-  pass against stub transports (`mock_client/tests/stub_check.cpp`). The live run
-  ships discovery and readiness fixtures (`mock_client/fixtures/`) so it also
-  exercises all 19 — the type axis (its two classes, image and non-image,
+The suite runs as three composable jobs (each `--phase` / `mode`): `extension-boot`
+→ `protocol-negotiation` (Layer 1) → `execution-delivery` (Layer 2). The stub
+self-test runs all phases at once (`--phase all`) and asserts the total.
+
+- **Negotiation phase (Layer 1, 19):** implemented and stub-verified — all 19
+  cases run and pass against stub transports (`mock_client/tests/stub_check.cpp`).
+  The live run ships discovery and readiness fixtures (`mock_client/fixtures/`) so
+  it also exercises all 19 — the type axis (its two classes, image and non-image,
   realized by IMAGE and a FILE_3D_GLB fixture) and the readiness decision (ready +
-  missing) included. Live coverage is partial unless those fixtures are supplied;
-  a missing fixture is reported as a `skip` rather than reducing the contract
-  count. Note the A5 cases verify the **client readiness decision**, not yet
-  server run-block enforcement (a Layer-2 item).
-- **Layer 2 (13):** not yet implemented. Adds `/notch/inject`, execution
-  lifecycle, disk/http/cuda delivery, the server-side delivery negatives, and the
-  remote topology (docker-compose) for the 6 remote deliveries. Output
-  feature/generation policies remain out of scope.
+  missing). A missing fixture is reported as a `skip`, not a reduced count. The A5
+  cases here verify the **client readiness decision**; runtime enforcement is in
+  the delivery phase.
+- **Delivery phase (Layer 2):** two cases implemented and stub-verified — an
+  `execution-success` case (model-free workflow → terminal `execution_success` via
+  WS, §9a) and a `file-availability-blocked` case (a workflow referencing a missing
+  file must be blocked at inject or terminated with `execution_error`, never
+  succeed). Each delivery case attaches per-case evidence: `websocket.jsonl`, a
+  `server.log` byte-offset slice, and `notch-diagnostics.json` (the WARNING+
+  records captured under that `prompt_id`). **Remaining (planned):** the full
+  disk/http/cuda delivery + hash-verification matrix, the server-side type/transport
+  negatives, and the remote topology (docker-compose) for the 6 remote deliveries.
+  Output feature/generation policies remain out of scope.
+
+Total live count today: **19 negotiation + 2 delivery = 21** (stub asserts 21).
 
 ## 9. v2 Diagnostics — WS assertions and per-case Notch logs (planned)
 

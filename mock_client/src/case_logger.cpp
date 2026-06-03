@@ -49,23 +49,37 @@ std::string Pad3(int index)
 CaseLogger::CaseLogger(const std::string& outputRoot)
     : m_root(outputRoot)
 {
-    EnsureDir(MatrixDir() + "/cases");
+    EnsureDir(ConformanceDir() + "/cases");
 }
 
-std::string CaseLogger::MatrixDir() const
+std::string CaseLogger::ConformanceDir() const
 {
-    return m_root + "/contract-matrix";
+    return m_root + "/conformance";
+}
+
+std::string CaseLogger::CaseDir(int index, const std::string& caseId) const
+{
+    return ConformanceDir() + "/cases/" + Pad3(index) + "-" + caseId;
 }
 
 void CaseLogger::Event(const std::string& jsonObject)
 {
-    std::ofstream stream(MatrixDir() + "/mock-client.jsonl", std::ios::app);
+    std::ofstream stream(ConformanceDir() + "/mock-client.jsonl", std::ios::app);
     stream << jsonObject << "\n";
+}
+
+void CaseLogger::AppendCaseFile(int index, const std::string& caseId, const std::string& filename,
+                                const std::string& content)
+{
+    const std::string dir = CaseDir(index, caseId);
+    EnsureDir(dir);
+    std::ofstream stream(dir + "/" + filename, std::ios::app);
+    stream << content;
 }
 
 void CaseLogger::WriteCase(const CaseRecord& record)
 {
-    const std::string dir = MatrixDir() + "/cases/" + Pad3(record.index) + "-" + record.caseId;
+    const std::string dir = CaseDir(record.index, record.caseId);
     EnsureDir(dir);
 
     std::ostringstream json;
@@ -105,14 +119,15 @@ void CaseLogger::WriteCase(const CaseRecord& record)
 
 void CaseLogger::WriteIndex()
 {
-    static const char* kPhases[] = {"liveness", "discovery", "readiness", "transport-selection"};
+    static const char* kPhases[] = {"liveness", "discovery", "readiness", "transport-selection",
+                                     "execution", "delivery"};
 
     std::ostringstream md;
-    md << "# Contract matrix — case index\n\n"
+    md << "# Conformance — case index\n\n"
        << "Each `cases/NNN-<id>/case.json` is a self-describing result: `title` (what\n"
        << "it checks), `description` (why), `spec_ref` (where it is derived), the\n"
        << "request, and `expected` vs `actual`. The cases are the output of the axis\n"
-       << "analysis in `docs/notch_contract_matrix_spec.md` (§2 axes, §3 counting\n"
+       << "analysis in `docs/notch_conformance_spec.md` (§2 axes, §3 counting\n"
        << "criterion, §4 exact counts) — not ad hoc.\n\n"
        << "**Who owns what (transport-selection cases).** A transport is *usable* only\n"
        << "if it is allowed by the output's type (Comfy-owned), available on the server\n"
@@ -144,7 +159,7 @@ void CaseLogger::WriteIndex()
         }
     }
 
-    std::ofstream stream(MatrixDir() + "/INDEX.md");
+    std::ofstream stream(ConformanceDir() + "/INDEX.md");
     stream << md.str();
 }
 

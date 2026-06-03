@@ -10,7 +10,7 @@ namespace notch_mock
 
 // IHttpTransport backed by ix::HttpClient. Talks plain http:// to the local
 // ComfyUI server and appends a sanitized record per request to
-// <outputRoot>/contract-matrix/http.jsonl for CI evidence.
+// <outputRoot>/conformance/http.jsonl for CI evidence.
 class LocalHttpTransport : public notch_comfy::IHttpTransport
 {
 public:

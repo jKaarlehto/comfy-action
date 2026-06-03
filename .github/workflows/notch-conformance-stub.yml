@@ -1,0 +1,45 @@
+name: Notch-Comfy conformance (stub self-test)
+
+# Cheap gate: compiles the transport-agnostic conformance core and the C++ client
+# compile-check against the *current* notch_comfy_client interface and runs the
+# stub self-test. No Docker, no GPU, no IXWebSocket, no network — just g++ and the
+# vendored interface source. This is the local build-check (mock_client/scripts/
+# local_build_check.sh) run in CI: it catches interface/mock API mismatches before
+# the heavy self-hosted conformance jobs run.
+
+on:
+  push:
+    paths:
+      - 'mock_client/**'
+      - '.github/workflows/notch-conformance-stub.yml'
+  workflow_dispatch:
+    inputs:
+      extension_repository:
+        description: 'ComfyUI-Notch repository providing cpp/notch_comfy_client'
+        required: false
+        default: 'jKaarlehto/ComfyUI-Notch'
+      extension_ref:
+        description: 'ComfyUI-Notch ref (tag/branch/commit)'
+        required: false
+        default: ''
+
+jobs:
+  stub:
+    name: Conformance stub self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@v4
+
+      - name: Checkout ComfyUI-Notch (interface source)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.extension_repository || 'jKaarlehto/ComfyUI-Notch' }}
+          ref: ${{ github.event.inputs.extension_ref || '' }}
+          path: _ext
+
+      - name: Local build check (compile-check + stub self-test)
+        run: |
+          set -euo pipefail
+          IFACE="$GITHUB_WORKSPACE/_ext/cpp/notch_comfy_client"
+          bash mock_client/scripts/local_build_check.sh "$IFACE"

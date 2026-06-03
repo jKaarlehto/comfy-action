@@ -1,0 +1,12 @@
+{
+  "loader": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "notch_ci_absent.safetensors" },
+    "_meta": { "title": "absent checkpoint" }
+  },
+  "out": {
+    "class_type": "NotchOutputNode",
+    "inputs": { "image": ["loader", 0] },
+    "_meta": { "title": "notch output" }
+  }
+}

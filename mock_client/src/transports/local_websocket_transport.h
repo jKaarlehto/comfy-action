@@ -15,7 +15,7 @@ namespace notch_mock
 
 // IWebSocketProbe (and the interface's IWebSocketTransport, via SendText)
 // backed by ix::WebSocket. Connects to /ws?clientId=<id>, sends text, and
-// records received text frames to <outputRoot>/contract-matrix/websocket.jsonl.
+// records received text frames to <outputRoot>/conformance/websocket.jsonl.
 class LocalWebSocketTransport : public IWebSocketProbe,
                                 public notch_comfy::IWebSocketTransport
 {

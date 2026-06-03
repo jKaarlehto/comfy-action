@@ -128,7 +128,7 @@ Keep configuration small:
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-initialization expectation. |
 
 Do not add arbitrary per-test selectors until the two modes prove too coarse.
-The contract matrix suite should own its case table in source control so a run is
+The conformance suite should own its case table in source control so a run is
 reproducible from `mode + comfyui_ref + extension_ref + action commit`.
 
 ## Extension Initialization Flow
@@ -243,7 +243,7 @@ must fail loudly, not cryptically:
   `Send`/`SendText` signature, a new pure-virtual method, a renamed
   request/response field), the run must stop with the stable code
   `transport_interface_incompatible` and surface the first diagnostic lines in
-  `contract-matrix-result.json`, instead of letting a raw CMake error abort the
+  `conformance-result.json`, instead of letting a raw CMake error abort the
   job with no contract framing.
 - **Startup version facts.** On every run the mock client logs
   `ClientProtocol::GetClientCompatibilityFacts()` — client interface version,
@@ -282,7 +282,7 @@ flags the gap to fix.
 The canonical case set — every axis, its components, the boundary counting
 criterion, the exact counts (Layer 1 = 18, full v2 = 31), the growth rules, and
 the spec→`mock_client` generation mapping — lives in
-`docs/notch_contract_matrix_spec.md`. Treat that document as the source of truth
+`docs/notch_conformance_spec.md`. Treat that document as the source of truth
 for the matrix; the tables below are worked examples derived from it.
 
 Output target is not a negotiation axis. It is the Notch-side decision about
@@ -407,7 +407,7 @@ Allowed case results:
 - `error`: the case could not complete because the harness, server, or client
   encountered an unexpected failure.
 
-The final `contract-matrix-result.json` should fail the job when any case is
+The final `conformance-result.json` should fail the job when any case is
 `fail` or `error`, but only after all runnable cases have completed. It should
 include totals by phase and result, plus a compact list of failed case ids and
 error codes.
@@ -418,7 +418,7 @@ Every case must write enough evidence to debug failures without replaying the
 run. Use one directory per case:
 
 ```text
-contract-matrix/
+conformance/
   cases/
     001-image-cuda-local/
       case.json
@@ -520,7 +520,7 @@ environment.log
 cpp-compile.log
 mock-client-build.log
 extension-initialization-result.json
-contract-matrix-result.json
+conformance-result.json
 compatibility-result.json
 ```
 
@@ -541,7 +541,7 @@ compatibility-result.json
 - Server URL and port.
 - Selected mode.
 - Extension-initialization assertions and result.
-- Contract matrix case summary when `mode=contract_matrix`.
+- Conformance case summary when `mode=contract_matrix`.
 
 Every run should also write `compatibility-result.json`:
 

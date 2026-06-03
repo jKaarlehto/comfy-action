@@ -1,11 +1,11 @@
-name: "ComfyUI-Notch compatibility checks"
-description: "Run ComfyUI-Notch extension initialization and contract matrix checks in a Docker container"
+name: "Notch-Comfy conformance"
+description: "Verify the notch_comfy_client C++ interface conforms to the ComfyUI-Notch extension protocol, in a Docker container"
 
 inputs:
   mode:
-    description: "Check mode. extension_initialization starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. contract_matrix is reserved for the future mock-client permutation suite."
+    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs the discovery + transport-negotiation + readiness-decision cases. execution_delivery runs the inject/execute/delivery cases and file-availability enforcement."
     required: false
-    default: "extension_initialization"
+    default: "extension_boot"
   comfyui_repository:
     description: "ComfyUI git repository URL."
     required: false

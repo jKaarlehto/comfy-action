@@ -10,7 +10,7 @@ Notch node classes and server feature facts.
 
 ## What It Checks
 
-`mode: extension_initialization`:
+`mode: extension_boot`:
 
 - clone ComfyUI at `comfyui_ref`;
 - copy or clone `ComfyUI-Notch` into `ComfyUI/custom_nodes/ComfyUI-Notch`;
@@ -22,9 +22,11 @@ Notch node classes and server feature facts.
 - assert `/object_info` contains `NotchSingleInput` and `NotchOutputNode`;
 - write environment, compatibility, log, and result artifacts.
 
-`mode: contract_matrix` is reserved for the next phase. It currently runs the
-extension-initialization path and then fails with a clear message instead of claiming the live
-HTTP/WS/CUDA permutation suite exists.
+`mode: protocol_negotiation` runs the boot setup and then the C++ mock client's
+discovery + transport-negotiation + readiness-decision cases (Layer 1, no GPU).
+`mode: execution_delivery` runs the boot setup and then the inject/execute/deliver
+cases plus file-availability enforcement (Layer 2, GPU). The three modes are
+composed as separate jobs in the consuming workflow.
 
 ## Runner Model
 
@@ -58,15 +60,15 @@ on:
         default: "v0.23.0"
 
 jobs:
-  extension_initialization:
-    runs-on: [self-hosted, comfy-contract]
+  extension-boot:
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run extension initialization check
+      - name: Run extension boot check
         uses: jKaarlehto/comfy-action@<pin-this-action-commit>
         with:
-          mode: extension_initialization
+          mode: extension_boot
           comfyui_ref: ${{ inputs.comfyui_ref }}
           use_gpu: auto
 ```
@@ -78,7 +80,7 @@ checks on a floating branch.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_initialization` | `extension_initialization` runs the implemented boot/node/feature/client compile check. `contract_matrix` is reserved for the future mock-client suite and currently fails after initialization. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds the Layer-1 discovery + transport-negotiation + readiness cases. `execution_delivery` adds the Layer-2 inject/execute/deliver cases + file-availability enforcement. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
@@ -111,8 +113,8 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `server-feature-flags.json`
 - `object-info-summary.json`
 - `object-info-debug.json` when node discovery fails
-- `extension-initialization-result.json`
-- `contract-matrix-result.json` when `mode: contract_matrix`
+- `extension-boot-result.json`
+- `conformance-result.json` when `mode: protocol_negotiation` or `execution_delivery`
 - `compatibility-result.json`
 
 `compatibility-result.json` is the file to use when promoting a
@@ -137,7 +139,7 @@ docker run --rm \
   -v /path/to/ComfyUI-Notch:/workspace \
   -v /tmp/notch-contract-artifacts:/artifacts \
   notch-contract-ci:local \
-  --mode extension_initialization \
+  --mode extension_boot \
   --comfyui-repository https://github.com/comfyanonymous/ComfyUI.git \
   --comfyui-ref v0.23.0 \
   --host 127.0.0.1 \

@@ -79,6 +79,52 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def emit_annotation(level: str, title: str, message: str) -> None:
+    """Emit a GitHub Actions workflow command so it shows on the run overview.
+
+    Stdout from the Docker step is scanned by the runner, so these surface as
+    annotations even though the script runs inside the container.
+    """
+
+    def esc(value: str) -> str:
+        return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+    title_esc = esc(title).replace(":", "%3A").replace(",", "%2C")
+    print(f"::{level} title={title_esc}::{esc(message)}", flush=True)
+
+
+def annotate_conformance(artifacts: Path, phase: str) -> None:
+    """Surface each conformance case (and the totals) as run-overview annotations."""
+    cases_dir = artifacts / "conformance" / "cases"
+    if cases_dir.is_dir():
+        for case_json in sorted(cases_dir.glob("*/case.json")):
+            try:
+                rec = json.loads(case_json.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            result = rec.get("result", "")
+            case_id = rec.get("case_id", case_json.parent.name)
+            title = rec.get("title", case_id)
+            if result in ("fail", "error"):
+                errors = ", ".join(rec.get("errors", [])) or result
+                emit_annotation("error", case_id, f"{title} — {result} ({errors})")
+            elif result == "skip":
+                emit_annotation("warning", case_id, f"{title} — skipped")
+
+    totals = {}
+    result_path = artifacts / "conformance-result.json"
+    if result_path.is_file():
+        try:
+            totals = json.loads(result_path.read_text(encoding="utf-8")).get("totals", {})
+        except Exception:
+            totals = {}
+    summary = (
+        f"pass={totals.get('pass', 0)} fail={totals.get('fail', 0)} "
+        f"skip={totals.get('skip', 0)} error={totals.get('error', 0)}"
+    )
+    emit_annotation("notice", f"Conformance {phase}", summary)
+
+
 def read_url_json(url: str, timeout_seconds: int = 10) -> Any:
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
@@ -404,8 +450,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ComfyUI-Notch compatibility checks")
     parser.add_argument(
         "--mode",
-        choices=["extension_initialization", "contract_matrix"],
-        default="extension_initialization",
+        choices=["extension_boot", "protocol_negotiation", "execution_delivery"],
+        default="extension_boot",
     )
     parser.add_argument("--comfyui-repository", required=True)
     parser.add_argument("--comfyui-ref", default="")
@@ -424,13 +470,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+CONFORMANCE_MODES = {
+    "protocol_negotiation": "negotiation",
+    "execution_delivery": "delivery",
+}
+
+
 def main() -> int:
     args = parse_args()
     mode = args.mode
+    conformance_phase = CONFORMANCE_MODES.get(mode)
     result_filename = (
-        "extension-initialization-result.json"
-        if mode == "extension_initialization"
-        else "contract-matrix-result.json"
+        "extension-boot-result.json"
+        if mode == "extension_boot"
+        else "conformance-result.json"
     )
     artifacts = Path(args.artifacts).resolve()
     workdir = Path(args.workdir).resolve()
@@ -535,7 +588,7 @@ def main() -> int:
             }
         )
 
-        if mode == "contract_matrix":
+        if conformance_phase is not None:
             try:
                 mock_exe = build_mock_client(runner, extension_dir, workdir)
             except MockClientBuildError as exc:
@@ -553,46 +606,63 @@ def main() -> int:
                 "--output-dir",
                 str(artifacts),
                 "--client-id",
-                "notch-contract-ci",
+                "notch-conformance",
+                "--phase",
+                conformance_phase,
             ]
-            # Supply discovery + readiness fixtures so the live run exercises the
-            # type-axis and deployment-readiness cases instead of skipping them.
-            fixture_flags = {
-                "--parse-workflow": fixtures / "parse_workflow.json",
-                "--required-files-ready": fixtures / "required_files_ready.json",
-                "--required-files-missing": fixtures / "required_files_missing.json",
-            }
+            # Negotiation fixtures exercise the type-axis and readiness-decision
+            # cases; delivery fixtures exercise execution and file-availability
+            # enforcement. Missing fixtures are recorded as skips, not failures.
+            fixture_flags: dict[str, Path] = {}
+            if conformance_phase == "negotiation":
+                fixture_flags = {
+                    "--parse-workflow": fixtures / "parse_workflow.json",
+                    "--required-files-ready": fixtures / "required_files_ready.json",
+                    "--required-files-missing": fixtures / "required_files_missing.json",
+                }
+            elif conformance_phase == "delivery":
+                fixture_flags = {
+                    "--execute-workflow": fixtures / "execute_workflow.json",
+                    "--execute-missing-file": fixtures / "execute_missing_file.json",
+                }
             for flag, path in fixture_flags.items():
                 if path.is_file():
                     mock_command += [flag, str(path)]
             run = runner.run(mock_command, log_name="mock-client.log", check=False)
-            # The mock client owns contract-matrix-result.json; read it back
-            # rather than overwriting its per-case totals.
-            matrix_result: dict[str, Any] = {}
-            matrix_path = artifacts / result_filename
-            if matrix_path.is_file():
+            # The mock client owns conformance-result.json; read it back rather
+            # than overwriting its per-case totals.
+            conformance_result: dict[str, Any] = {}
+            conformance_path = artifacts / result_filename
+            if conformance_path.is_file():
                 try:
-                    matrix_result = json.loads(matrix_path.read_text(encoding="utf-8"))
+                    conformance_result = json.loads(conformance_path.read_text(encoding="utf-8"))
                 except Exception:
-                    matrix_result = {}
-            passed = run.returncode == 0 and matrix_result.get("result") == "pass"
+                    conformance_result = {}
+            passed = run.returncode == 0 and conformance_result.get("result") == "pass"
             compatibility = {
                 "schema_version": 1,
                 "profile": mode,
+                "phase": conformance_phase,
                 "result": "pass" if passed else "fail",
                 "comfyui_ref": args.comfyui_ref,
                 "comfyui_commit": environment["comfyui_commit"],
                 "comfyui_notch_commit": environment["extension_commit"],
                 "runner": result["runner"],
                 "checks": {**result["checks"], "mock_client_built": True},
-                "contract_matrix": matrix_result.get("totals", {}),
+                "conformance": conformance_result.get("totals", {}),
                 "environment_snapshot_sha256": file_sha256(artifacts / "environment.json"),
             }
             write_json(artifacts / "compatibility-result.json", compatibility)
+            annotate_conformance(artifacts, conformance_phase)
             return 0 if passed else 1
 
         result["result"] = "pass"
         write_json(artifacts / result_filename, result)
+        emit_annotation(
+            "notice",
+            "Extension boot",
+            "ComfyUI started, Notch nodes loaded, client interface compiled",
+        )
 
         compatibility = {
             **result,
