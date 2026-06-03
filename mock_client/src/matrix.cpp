@@ -743,7 +743,7 @@ void RunDeliveryCases(
     if (options.executeWorkflowJson.empty())
     {
         CaseRecord rec;
-        rec.caseId = "execution-success";
+        rec.caseId = "execution-lifecycle";
         rec.title = "Execution skipped (no execute workflow fixture)";
         rec.phase = "execution";
         rec.description = "No model-free execute workflow fixture was supplied, so the execution lifecycle was not exercised.";
@@ -754,16 +754,16 @@ void RunDeliveryCases(
     }
     else
     {
-        RunExecutionCase(recorder, http, ws, logger, options, "execution-success",
-            "Model-free workflow executes to execution_success",
-            "Submit a model-free workflow with execute=true and wait for the terminal WS event; it must reach execution_success.",
+        RunExecutionCase(recorder, http, ws, logger, options, "execution-lifecycle",
+            "Submitted workflow runs to a terminal execution_success",
+            "Submit a workflow with execute=true and wait for the terminal WS event; it must reach execution_success. The fixture is model-free (no checkpoint) so the runner needs no models — this proves the inject -> queue -> execute -> success lifecycle, not model inference.",
             options.executeWorkflowJson, /*expectSuccess=*/true);
     }
 
     if (options.executeMissingFileJson.empty())
     {
         CaseRecord rec;
-        rec.caseId = "file-availability-blocked";
+        rec.caseId = "file-availability";
         rec.title = "File-availability enforcement skipped (no missing-file fixture)";
         rec.phase = "delivery";
         rec.description = "No missing-file execute workflow fixture was supplied, so runtime file-availability enforcement was not exercised.";
@@ -774,8 +774,8 @@ void RunDeliveryCases(
     }
     else
     {
-        RunExecutionCase(recorder, http, ws, logger, options, "file-availability-blocked",
-            "Workflow referencing a missing file is blocked, not run",
+        RunExecutionCase(recorder, http, ws, logger, options, "file-availability",
+            "Workflow with a missing input file should be blocked, not run",
             "Submit a workflow whose required file is absent on the server with execute=true; the run must be blocked (rejected at inject or terminated with execution_error) and must not reach execution_success.",
             options.executeMissingFileJson, /*expectSuccess=*/false);
     }

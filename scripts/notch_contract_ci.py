@@ -107,9 +107,9 @@ def annotate_conformance(artifacts: Path, phase: str) -> None:
             title = rec.get("title", case_id)
             if result in ("fail", "error"):
                 errors = ", ".join(rec.get("errors", [])) or result
-                emit_annotation("error", case_id, f"{title} — {result} ({errors})")
+                emit_annotation("error", case_id, f"{result.upper()} — {title} [{errors}]")
             elif result == "skip":
-                emit_annotation("warning", case_id, f"{title} — skipped")
+                emit_annotation("warning", case_id, f"SKIP — {title}")
 
     totals = {}
     result_path = artifacts / "conformance-result.json"

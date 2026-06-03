@@ -5,8 +5,8 @@
     "_meta": { "title": "solid image source" }
   },
   "out": {
-    "class_type": "NotchOutputNode",
-    "inputs": { "image": ["img", 0] },
-    "_meta": { "title": "notch output (noop)" }
+    "class_type": "PreviewImage",
+    "inputs": { "images": ["img", 0] },
+    "_meta": { "title": "preview (stock output node)" }
   }
 }
