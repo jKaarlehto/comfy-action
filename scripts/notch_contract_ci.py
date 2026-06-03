@@ -380,6 +380,144 @@ def python_env_snapshot(runner: CommandRunner, python: Path, artifacts: Path) ->
     return snapshot
 
 
+def _parse_driver_version(nvidia_smi_text: str) -> str:
+    import re
+
+    match = re.search(r"Driver Version:\s*([\d.]+)", nvidia_smi_text)
+    return match.group(1) if match else ""
+
+
+def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: str = "container") -> dict[str, Any]:
+    """Capture CUDA + IPC/cgroup launch facts and assert the container was launched
+    with the namespace sharing CUDA IPC needs on WSL2 GPU-PV.
+
+    On WSL2 GPU-PV, cudaIpcOpenMemHandle is backed by host-level IPC primitives, so
+    it only works when the container shares the host IPC namespace (--ipc=host).
+    The display driver (host-mapped into the container) must also be >= R510 for
+    legacy CUDA IPC. These are *host* facts observed from inside the container;
+    asserting them in the job means a launch-script regression that drops
+    --ipc=host or --cgroupns=host is caught here, not as a silent CUDA failure.
+
+    The launch script passes the host PID-1 namespace inodes (HOST_IPC_NS /
+    HOST_CGROUP_NS) from a --pid=host probe; when present the checks are exact —
+    the container namespace must equal the host namespace. cgroupns is
+    additionally self-detected from /proc/self/cgroup ('0::/' means a private
+    cgroup namespace, i.e. --cgroupns=host did NOT take effect).
+    """
+    diag: dict[str, Any] = {"schema_version": 1, "side": side}
+    nvidia_smi = command_text(["nvidia-smi"])
+    diag["nvidia_smi"] = nvidia_smi
+    diag["driver_version"] = _parse_driver_version(nvidia_smi)
+
+    def _readlink(path: str) -> str:
+        try:
+            return os.readlink(path)
+        except OSError as exc:
+            return f"error: {exc}"
+
+    diag["ipc_namespace"] = _readlink("/proc/self/ns/ipc")
+    diag["cgroup_namespace"] = _readlink("/proc/self/ns/cgroup")
+    try:
+        diag["cgroup_path"] = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        diag["cgroup_path"] = f"error: {exc}"
+    try:
+        stat = os.statvfs("/dev/shm")
+        diag["dev_shm_bytes_total"] = stat.f_blocks * stat.f_frsize
+        diag["dev_shm_bytes_free"] = stat.f_bavail * stat.f_frsize
+    except OSError as exc:
+        diag["dev_shm_error"] = str(exc)
+
+    host_ipc_ns = os.environ.get("HOST_IPC_NS", "").strip()
+    host_cgroup_ns = os.environ.get("HOST_CGROUP_NS", "").strip()
+    expect_ipc_host = os.environ.get("EXPECT_IPC_HOST") == "1"
+    expect_cgroupns_host = os.environ.get("EXPECT_CGROUPNS_HOST") == "1"
+    diag["host_reference"] = {"ipc_namespace": host_ipc_ns, "cgroup_namespace": host_cgroup_ns}
+    diag["expectations"] = {"ipc_host": expect_ipc_host, "cgroupns_host": expect_cgroupns_host}
+
+    assertions: list[dict[str, Any]] = []
+
+    driver = diag["driver_version"]
+    try:
+        driver_major = int(driver.split(".")[0]) if driver else 0
+    except ValueError:
+        driver_major = 0
+    assertions.append(
+        {
+            "name": "driver_supports_legacy_cuda_ipc",
+            "ok": driver_major >= 510,
+            "detail": f"host display driver {driver or 'unknown'} (legacy CUDA IPC needs >= R510)",
+        }
+    )
+
+    if expect_ipc_host:
+        if host_ipc_ns:
+            assertions.append(
+                {
+                    "name": "ipc_namespace_matches_host",
+                    "ok": diag["ipc_namespace"] == host_ipc_ns,
+                    "detail": f"container {diag['ipc_namespace']} vs host {host_ipc_ns} (--ipc=host)",
+                }
+            )
+        else:
+            shm_total = diag.get("dev_shm_bytes_total", 0)
+            assertions.append(
+                {
+                    "name": "ipc_namespace_likely_host",
+                    "ok": isinstance(shm_total, int) and shm_total != 67108864,
+                    "detail": f"/dev/shm total {shm_total} bytes (heuristic; default private shm is 64MiB)",
+                    "heuristic": True,
+                }
+            )
+
+    if expect_cgroupns_host:
+        cgroup_path = diag.get("cgroup_path", "")
+        self_detect_host = isinstance(cgroup_path, str) and cgroup_path.strip() not in ("0::/", "")
+        if host_cgroup_ns:
+            assertions.append(
+                {
+                    "name": "cgroup_namespace_matches_host",
+                    "ok": diag["cgroup_namespace"] == host_cgroup_ns,
+                    "detail": f"container {diag['cgroup_namespace']} vs host {host_cgroup_ns} (--cgroupns=host)",
+                }
+            )
+        assertions.append(
+            {
+                "name": "cgroup_namespace_is_host_view",
+                "ok": self_detect_host,
+                "detail": f"/proc/self/cgroup = '{cgroup_path}' (a private cgroup ns reports '0::/')",
+            }
+        )
+
+    if python is not None:
+        code = (
+            "import json\n"
+            "d={}\n"
+            "try:\n"
+            " import torch\n"
+            " d['torch']=torch.__version__\n"
+            " d['torch_cuda_version']=torch.version.cuda\n"
+            " d['torch_cuda_available']=bool(torch.cuda.is_available())\n"
+            "except Exception as e:\n"
+            " d['torch_error']=str(e)\n"
+            "print(json.dumps(d, sort_keys=True))\n"
+        )
+        result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=False)
+        try:
+            diag["runtime"] = json.loads(result.stdout.strip().splitlines()[-1])
+        except Exception:
+            diag["runtime_error"] = result.stderr.strip()[:500]
+
+    diag["assertions"] = assertions
+    diag["assertions_ok"] = all(item["ok"] for item in assertions)
+    write_json(artifacts / "cuda-diagnostics.json", diag)
+
+    for item in assertions:
+        if not item["ok"]:
+            emit_annotation("warning", f"CUDA launch ({side})", f"{item['name']}: {item['detail']}")
+    return diag
+
+
 def collect_server_features(base_url: str, artifacts: Path) -> dict[str, Any]:
     try:
         features = read_url_json(f"{base_url}/features", timeout_seconds=20)
@@ -537,6 +675,7 @@ def main() -> int:
             base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
             poll_url(f"{base_url}/queue", args.timeout)
             remote_features = collect_server_features(base_url, artifacts)
+            collect_cuda_diagnostics(artifacts, None, side=mode)
 
             try:
                 mock_exe = build_mock_client(runner, workspace, workdir)
@@ -630,6 +769,7 @@ def main() -> int:
             args.install_torch == "true",
         )
         env_snapshot = python_env_snapshot(runner, python, artifacts)
+        collect_cuda_diagnostics(artifacts, python, side=mode)
 
         compile_cpp_client(runner, extension_dir, workdir)
         result["checks"]["cpp_client_compiles"] = True

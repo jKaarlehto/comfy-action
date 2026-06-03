@@ -156,8 +156,35 @@ runs:
         }
 
         $actionPath = "${{ github.action_path }}"
+        # CUDA IPC on WSL2 GPU-PV is backed by host-level IPC primitives, so the
+        # default private IPC namespace breaks cudaIpcOpenMemHandle even between
+        # two processes in the same container (delivery_local runs the server and
+        # mock client side by side). --ipc=host shares the host IPC namespace;
+        # --cgroupns=host is the companion the NVIDIA WSL2 runtime guidance lists.
+        if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+          & nvidia-smi *> (Join-Path $artifactHost "host-nvidia-smi.txt")
+        }
+        # Capture the host (WSL2) PID-1 IPC + cgroup namespace inodes so the
+        # container can assert it actually shares them (--ipc=host / --cgroupns=host).
+        # If a future edit drops a flag, the container's inode won't match the host's
+        # and the job flags the degradation instead of silently breaking CUDA IPC.
+        $hostIpcNs = ""
+        $hostCgroupNs = ""
+        try {
+          $nsOut = & docker run --rm --pid=host --entrypoint sh "${{ inputs.docker_image }}" -c "readlink /proc/1/ns/ipc; readlink /proc/1/ns/cgroup" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $nsOut.Count -ge 2) {
+            $hostIpcNs = $nsOut[0].Trim()
+            $hostCgroupNs = $nsOut[1].Trim()
+            @{ ipc = $hostIpcNs; cgroup = $hostCgroupNs } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifactHost "host-namespaces.json")
+          }
+        } catch {}
         $dockerArgs = @(
-          "run", "--rm"
+          "run", "--rm",
+          "--ipc=host", "--cgroupns=host",
+          "-e", "EXPECT_IPC_HOST=1",
+          "-e", "EXPECT_CGROUPNS_HOST=1",
+          "-e", "HOST_IPC_NS=$hostIpcNs",
+          "-e", "HOST_CGROUP_NS=$hostCgroupNs"
         ) + $gpuArgs + @(
           "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
           "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
@@ -226,6 +253,23 @@ runs:
         $serverArtifacts = Join-Path $artifactHost "server"
         New-Item -ItemType Directory -Force -Path $serverArtifacts | Out-Null
 
+        if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+          & nvidia-smi *> (Join-Path $artifactHost "host-nvidia-smi.txt")
+        }
+        # Host (WSL2) PID-1 IPC + cgroup namespace inodes, so both containers can
+        # assert they actually share them (--ipc=host / --cgroupns=host); a dropped
+        # flag is then caught in-job rather than as a silent CUDA IPC failure.
+        $hostIpcNs = ""
+        $hostCgroupNs = ""
+        try {
+          $nsOut = & docker run --rm --pid=host --entrypoint sh "${{ inputs.docker_image }}" -c "readlink /proc/1/ns/ipc; readlink /proc/1/ns/cgroup" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $nsOut.Count -ge 2) {
+            $hostIpcNs = $nsOut[0].Trim()
+            $hostCgroupNs = $nsOut[1].Trim()
+            @{ ipc = $hostIpcNs; cgroup = $hostCgroupNs } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifactHost "host-namespaces.json")
+          }
+        } catch {}
+
         & docker network create $networkName
         if ($LASTEXITCODE -ne 0) {
           exit $LASTEXITCODE
@@ -235,7 +279,12 @@ runs:
           $serverArgs = @(
             "run", "-d",
             "--name", $serverName,
-            "--network", $networkName
+            "--network", $networkName,
+            "--ipc=host", "--cgroupns=host",
+            "-e", "EXPECT_IPC_HOST=1",
+            "-e", "EXPECT_CGROUPNS_HOST=1",
+            "-e", "HOST_IPC_NS=$hostIpcNs",
+            "-e", "HOST_CGROUP_NS=$hostCgroupNs"
           ) + $gpuArgs + @(
             "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
             "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
@@ -269,6 +318,11 @@ runs:
           $clientArgs = @(
             "run", "--rm",
             "--network", $networkName,
+            "--ipc=host", "--cgroupns=host",
+            "-e", "EXPECT_IPC_HOST=1",
+            "-e", "EXPECT_CGROUPNS_HOST=1",
+            "-e", "HOST_IPC_NS=$hostIpcNs",
+            "-e", "HOST_CGROUP_NS=$hostCgroupNs",
             "-e", "GITHUB_REPOSITORY=$env:GITHUB_REPOSITORY",
             "-e", "GITHUB_RUN_ID=$env:GITHUB_RUN_ID",
             "-e", "GITHUB_RUN_ATTEMPT=$env:GITHUB_RUN_ATTEMPT",
