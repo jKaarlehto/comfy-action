@@ -13,7 +13,7 @@
 #include "transports/local_http_transport.h"
 #include "transports/local_websocket_transport.h"
 
-#if defined(NOTCH_MOCK_HAS_CUDA_DRIVER)
+#if defined(NOTCH_MOCK_HAS_CUDA_RUNTIME)
 #include "transports/local_cuda_share_reader.h"
 #endif
 
@@ -87,7 +87,7 @@ int main(int argc, char** argv)
     notch_mock::CaseLogger logger(outputRoot);
     notch_mock::LocalHttpTransport http(baseUrl, outputRoot);
     notch_mock::LocalWebSocketTransport ws(wsUrl, outputRoot);
-#if defined(NOTCH_MOCK_HAS_CUDA_DRIVER)
+#if defined(NOTCH_MOCK_HAS_CUDA_RUNTIME)
     notch_mock::LocalCudaShareReader cudaReader;
     notch_mock::ICudaShareReader* cudaReaderPtr = &cudaReader;
 #else
