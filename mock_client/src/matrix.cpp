@@ -730,9 +730,9 @@ void RunNegotiationCases(
     }
 }
 
-// Delivery phase (Layer 2): execute a model-free workflow and assert the terminal
-// WS event, and enforce file-availability (a workflow referencing a missing file
-// must be blocked, not run). Each case attaches per-case diagnostics + evidence.
+// Delivery phase (Layer 2): submit a workflow for execution and assert the
+// terminal WS event, and enforce file-availability (a workflow referencing a
+// missing file must be blocked, not run). Each case attaches per-case evidence.
 void RunDeliveryCases(
     CaseRecorder& recorder,
     notch_comfy::IHttpTransport& http,
@@ -743,10 +743,10 @@ void RunDeliveryCases(
     if (options.executeWorkflowJson.empty())
     {
         CaseRecord rec;
-        rec.caseId = "execution-lifecycle";
-        rec.title = "Execution skipped (no execute workflow fixture)";
+        rec.caseId = "workflow-execution";
+        rec.title = "Workflow execution skipped (no execute workflow fixture)";
         rec.phase = "execution";
-        rec.description = "No model-free execute workflow fixture was supplied, so the execution lifecycle was not exercised.";
+        rec.description = "No execute workflow fixture was supplied, so workflow execution was not exercised.";
         rec.specRef = kSpecExecution;
         rec.actualJson = "{\"reason\":\"no_execute_workflow\"}";
         rec.result = "skip";
@@ -754,19 +754,19 @@ void RunDeliveryCases(
     }
     else
     {
-        RunExecutionCase(recorder, http, ws, logger, options, "execution-lifecycle",
-            "Submitted workflow runs to a terminal execution_success",
-            "Submit a workflow with execute=true and wait for the terminal WS event; it must reach execution_success. The fixture is model-free (no checkpoint) so the runner needs no models — this proves the inject -> queue -> execute -> success lifecycle, not model inference.",
+        RunExecutionCase(recorder, http, ws, logger, options, "workflow-execution",
+            "A submitted workflow runs to execution_success",
+            "Submit a workflow with execute=true and wait for the terminal WebSocket event; it must reach execution_success. This proves the inject -> queue -> execute -> success lifecycle.",
             options.executeWorkflowJson, /*expectSuccess=*/true);
     }
 
     if (options.executeMissingFileJson.empty())
     {
         CaseRecord rec;
-        rec.caseId = "file-availability";
+        rec.caseId = "missing-input-file";
         rec.title = "File-availability enforcement skipped (no missing-file fixture)";
         rec.phase = "delivery";
-        rec.description = "No missing-file execute workflow fixture was supplied, so runtime file-availability enforcement was not exercised.";
+        rec.description = "No missing-file fixture was supplied, so file-availability enforcement was not exercised.";
         rec.specRef = kSpecFileAvailability;
         rec.actualJson = "{\"reason\":\"no_missing_file_workflow\"}";
         rec.result = "skip";
@@ -774,9 +774,9 @@ void RunDeliveryCases(
     }
     else
     {
-        RunExecutionCase(recorder, http, ws, logger, options, "file-availability",
-            "Workflow with a missing input file should be blocked, not run",
-            "Submit a workflow whose required file is absent on the server with execute=true; the run must be blocked (rejected at inject or terminated with execution_error) and must not reach execution_success.",
+        RunExecutionCase(recorder, http, ws, logger, options, "missing-input-file",
+            "A workflow referencing a missing input file is blocked",
+            "Submit a workflow that references an input file the server does not have, with execute=true. The run must be blocked (rejected at inject or terminated with execution_error) and must not reach execution_success.",
             options.executeMissingFileJson, /*expectSuccess=*/false);
     }
 }

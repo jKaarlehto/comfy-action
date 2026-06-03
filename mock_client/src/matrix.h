@@ -47,7 +47,7 @@ struct MatrixOptions
     // references a missing file. Empty fixtures skip the gate.
     std::string requiredFilesReadyJson;
     std::string requiredFilesMissingJson;
-    // Delivery-phase execution fixtures: a model-free workflow that must execute
+    // Delivery-phase execution fixtures: a workflow that must execute
     // successfully, and one referencing a missing file whose run must be blocked
     // (the file-availability enforcement). Empty fixtures skip those cases.
     std::string executeWorkflowJson;
