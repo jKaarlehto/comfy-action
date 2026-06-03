@@ -336,7 +336,7 @@ runs:
 
     - name: "[Docker] Upload contract artifacts"
       if: ${{ inputs.upload_artifacts == 'true' && always() }}
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: notch-contract-${{ inputs.mode }}-${{ github.run_id }}
         path: ${{ github.workspace }}/${{ inputs.artifact_dir }}
