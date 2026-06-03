@@ -387,6 +387,40 @@ def _parse_driver_version(nvidia_smi_text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _render_cuda_summary(diag: dict[str, Any]) -> str:
+    """Render the host + container CUDA env and launch-flag assertions as markdown.
+
+    Used both as a foldable job-log group and as a $GITHUB_STEP_SUMMARY section so
+    the driver, the container-vs-host IPC/cgroup namespaces, and the flag
+    assertions are visible at a glance without digging through the raw log.
+    """
+    runtime_facts = diag.get("runtime") if isinstance(diag.get("runtime"), dict) else {}
+    host = diag.get("host_reference", {}) if isinstance(diag.get("host_reference"), dict) else {}
+    side = diag.get("side", "container")
+    lines = [
+        f"### CUDA environment & launch assertions ({side})",
+        "",
+        "| fact | value |",
+        "| --- | --- |",
+        f"| display driver (host-mapped) | `{diag.get('driver_version') or 'unknown'}` |",
+        f"| torch / cuda | `{runtime_facts.get('torch', '?')}` / cuda `{runtime_facts.get('torch_cuda_version', '?')}` "
+        f"(available={runtime_facts.get('torch_cuda_available', '?')}) |",
+        f"| ipc ns — container | `{diag.get('ipc_namespace', '?')}` |",
+        f"| ipc ns — host ref | `{host.get('ipc_namespace') or '(not provided)'}` |",
+        f"| cgroup ns — container | `{diag.get('cgroup_namespace', '?')}` |",
+        f"| cgroup ns — host ref | `{host.get('cgroup_namespace') or '(not provided)'}` |",
+        f"| /dev/shm total | `{diag.get('dev_shm_bytes_total', '?')}` bytes |",
+        "",
+        "| assertion | result | detail |",
+        "| --- | --- | --- |",
+    ]
+    for item in diag.get("assertions", []):
+        mark = "✅ pass" if item.get("ok") else "❌ FAIL"
+        lines.append(f"| `{item.get('name', '')}` | {mark} | {item.get('detail', '')} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: str = "container") -> dict[str, Any]:
     """Capture CUDA + IPC/cgroup launch facts and assert the container was launched
     with the namespace sharing CUDA IPC needs on WSL2 GPU-PV.
@@ -511,6 +545,14 @@ def collect_cuda_diagnostics(artifacts: Path, python: Path | None = None, side: 
     diag["assertions"] = assertions
     diag["assertions_ok"] = all(item["ok"] for item in assertions)
     write_json(artifacts / "cuda-diagnostics.json", diag)
+
+    # Write a markdown section (picked up into $GITHUB_STEP_SUMMARY host-side) and
+    # emit the same content as a foldable group in this step's log.
+    summary_md = _render_cuda_summary(diag)
+    (artifacts / "cuda-summary.md").write_text(summary_md + "\n", encoding="utf-8")
+    print(f"::group::CUDA environment & launch assertions ({side})", flush=True)
+    print(summary_md, flush=True)
+    print("::endgroup::", flush=True)
 
     for item in assertions:
         if not item["ok"]:

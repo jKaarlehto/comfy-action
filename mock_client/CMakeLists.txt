@@ -29,6 +29,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ixwebsocket)
 
+# IXWebSocket is a vendored third-party dependency; silence its own compiler
+# warnings (e.g. -Wunused-parameter in its deflate codec) so the build log shows
+# only warnings from our code, not noise from the dependency.
+if(TARGET ixwebsocket)
+    target_compile_options(ixwebsocket PRIVATE -w)
+endif()
+
 find_package(CUDAToolkit QUIET)
 
 # Transport-agnostic contract logic. Depends only on the client interface, so it

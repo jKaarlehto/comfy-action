@@ -211,8 +211,13 @@ runs:
           "--expected-node-classes", "${{ inputs.expected_node_classes }}"
         )
         & docker @dockerArgs
-        if ($LASTEXITCODE -ne 0) {
-          exit $LASTEXITCODE
+        $dockerExit = $LASTEXITCODE
+        $cudaSummary = Join-Path $artifactHost "cuda-summary.md"
+        if ((Test-Path -LiteralPath $cudaSummary) -and $env:GITHUB_STEP_SUMMARY) {
+          Get-Content -LiteralPath $cudaSummary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        }
+        if ($dockerExit -ne 0) {
+          exit $dockerExit
         }
 
     - name: "[Docker] Run remote delivery topology"
@@ -357,6 +362,11 @@ runs:
           & docker logs $serverName *> $serverLog
           & docker rm -f $serverName *> $null
           & docker network rm $networkName *> $null
+          foreach ($cudaSummary in @((Join-Path $serverArtifacts "cuda-summary.md"), (Join-Path $artifactHost "cuda-summary.md"))) {
+            if ((Test-Path -LiteralPath $cudaSummary) -and $env:GITHUB_STEP_SUMMARY) {
+              Get-Content -LiteralPath $cudaSummary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            }
+          }
         }
 
     - name: "[Docker] Upload contract artifacts"
