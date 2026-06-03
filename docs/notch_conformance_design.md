@@ -91,7 +91,8 @@ CI product:
 - In `delivery_local` mode, execute real workflows and verify local disk, HTTP,
   and CUDA delivery evidence.
 - In `delivery_remote` mode, run separate server/client containers and verify
-  remote HTTP delivery plus unreachable disk/CUDA rejection.
+  remote HTTP delivery, named-route disk delivery, and unreachable disk/CUDA
+  rejection.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
 ## Non-Goals

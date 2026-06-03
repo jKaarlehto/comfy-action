@@ -354,15 +354,13 @@ nearly free.
   §2 gates cuda on `cuda_device_index ≥ 0`. CUDA availability is the *only* skip
   gate for cuda delivery (see §Delivery CUDA below); an available-but-failed
   import is a **fail**, never a skip.
-- **`remote-route-disk` (15 cases)** skip with reason `named_route_unsupported`
-  until the extension advertises `extension.notch.named_route_disk` in
-  `/features`. Named routes are **not implemented in ComfyUI-Notch yet**
-  (`features.md` lists "Named-route remote disk" as `- [ ]`; no
-  `route_id`/`relative_path` resolver in source — `disk` output currently writes
-  the server's own output dir). The extension must add: (1) accept `{route_id,
-  relative_path}` in `config.output.disk`, (2) an admin server-root map keyed by
-  `route_id`, (3) publish the capability flag. The cases are **emitted and
-  tracked** (`INDEX.md`: `… — SKIP`), self-clearing the moment the flag ships.
+- **`remote-route-disk`** is active when the action config provides a matching
+  server/client named route and `/features` advertises that route under
+  `extension.notch.named_disk_routes.route_ids`. The route ID is deployment
+  capability data, not the selected output transport. A disk request still
+  carries per-run `config.output.disk.named_route_id` plus optional
+  `relative_directory`, and the ready event returns the same `named_route_id`
+  plus final `relative_path`.
 
 **Topologies as jobs:**
 
@@ -370,14 +368,14 @@ nearly free.
   filesystem and host-local CUDA IPC. Covers the `local` row (21) plus the
   file-availability runtime gate (1) = 22.
 - **delivery-remote** — two containers on a private Docker network. Without a
-  shared volume it covers `remote-http` (15). With a shared Docker **named
-  volume** mounted at *different* paths per container (e.g. `/srv/out` server,
-  `/mnt/notch` client), it covers `remote-route-disk` (15, skipped until the flag):
-  the route config (`route_id → server_root` / `route_id → client_root`) is the
-  agreement, the request carries `{route_id, relative_path}` not an absolute path,
-  and the transactional write (`.tmp` → atomic rename) + client read/verify turns
-  a misconfiguration into a visible failure (`features.md` §"disk (remote NAS,
-  niche)").
+  named route it covers the `remote-http` reachability regime. With a host-backed
+  route directory mounted at *different* paths per container (e.g.
+  `/srv/notch-named-routes/ci_shared_output` server,
+  `/mnt/notch-named-routes/ci_shared_output` client), it covers the
+  `remote-route-disk` regime: the route config (`named_route_id → server_root` /
+  `named_route_id → client_root`) is the agreement, the request carries
+  `named_route_id` not an absolute path, and the ready event's `relative_path`
+  plus client route root is the client-readable artifact path.
 
 Both delivery jobs depend on `extension-boot` and `protocol-negotiation`. There
 is no standalone run-lifecycle job: a workflow that only proves
@@ -390,11 +388,12 @@ Layer 2 excludes output feature/generation policies (metadata embedding, manifes
 embedding, previews) — out of scope per §Scope.
 
 **Implementation status.** The matrix above is the **target**. Implemented today:
-6 of 52 — `local` disk/http/cuda (3 positives), `remote-http` http positive (1),
-and the `remote-http` disk/cuda reachability rejects (2). The remaining positives
-(per-type breadth), the per-topology coherence rejects, and the `remote-route-disk`
-topology are not yet generated. The `delivery-local`/`delivery-remote` cases are
-not stub-verifiable (they need a live server); only the negotiation layer is
+7 of 52 — `local` disk/http/cuda (3 positives), `remote-http` http positive (1),
+the `remote-http` disk/cuda reachability rejects (2), and `remote-route-disk`
+file-path disk positive (1). The remaining positives (per-type breadth) and the
+per-topology coherence rejects are not yet generated. The
+`delivery-local`/`delivery-remote` cases are not stub-verifiable (they need a
+live server); only the negotiation layer and pure cardinality arithmetic are
 covered by `stub_check`.
 
 ### Totals (exact)
@@ -403,13 +402,13 @@ covered by `stub_check`.
 Layer 1 (selection/discovery/readiness) — fully implemented:
   2 liveness + 2 type-axis + 2 readiness + 10 hard + 4 soft = 20  (all active)
 
-Layer 2 (delivery coherence matrix) — target 52, implemented 6:
+Layer 2 (delivery coherence matrix) — target 52, implemented 7:
   target    = 52  (local 21 + file-availability 1 + remote-http 15 + remote-route-disk 15)
-  implemented = 6  (local disk/http/cuda + remote-http http positive + 2 remote rejects)
-  capability-skipped at target: remote-route-disk (15, until named-route flag);
-    cuda cases skip without a GPU
+  implemented = 7  (local disk/http/cuda + remote-http http positive + 2 remote rejects
+                    + remote-route-disk file_path disk)
+  capability-skipped at target: cuda cases skip without a GPU
 
-full conformance: Layer 1 = 20 implemented; Layer 2 = 6 of 52 implemented
+full conformance: Layer 1 = 20 implemented; Layer 2 = 7 of 52 implemented
 ```
 
 ## 5. Growth rules — how the count changes when behavior grows
@@ -513,13 +512,12 @@ Do not add a permanent standalone execution job. Delivery owns execution
 lifecycle assertions.
 
 **Implemented today:** Layer 1 = **20** (fully implemented, stub-verified);
-Layer 2 = **6 of the 52-case target** delivery matrix (§4): `local` disk/http/cuda
-positives, the `remote-http` http positive, and the two `remote-http`
-reachability rejects. The remaining delivery breadth (per-type positives,
-per-topology coherence rejects, and the `remote-route-disk` topology) is the
-target in §4, not yet generated. Active counts are environment-dependent: cuda
-delivery skips without a GPU, and `remote-route-disk` skips until the extension
-advertises `extension.notch.named_route_disk`.
+Layer 2 = **7 of the 52-case target** delivery matrix (§4): `local`
+disk/http/cuda positives, the `remote-http` http positive, the two
+`remote-http` reachability rejects, and the `remote-route-disk` file-path disk
+positive. The remaining delivery breadth (per-type positives and per-topology
+coherence rejects) is the target in §4, not yet generated. Active counts are
+environment-dependent: cuda delivery skips without a GPU.
 
 ## 9. Delivery Diagnostics — WS assertions and per-case Notch diagnostics
 

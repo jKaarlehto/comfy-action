@@ -64,6 +64,10 @@ int main(int argc, char** argv)
     const std::string assetRoot = ArgValue(argc, argv, "--asset-root", "/workspace/tests/assets/round_trip");
     const std::string sourceFilePath = ArgValue(argc, argv, "--source-file", "");
     const std::string localOutputPath = ArgValue(argc, argv, "--local-output-path", "/tmp/notch-conformance-output");
+    const std::string namedRouteId = ArgValue(argc, argv, "--named-route-id", "");
+    const std::string namedRouteClientRoot = ArgValue(argc, argv, "--named-route-client-root", "");
+    const std::string namedRouteRelativeDirectory =
+        ArgValue(argc, argv, "--named-route-relative-directory", "remote-route");
     const std::string serverLogPath = ArgValue(argc, argv, "--server-log", outputRoot + "/comfyui.log");
     const std::string wsUrl =
         ArgValue(argc, argv, "--ws-url", DeriveWsBase(baseUrl) + "/ws?clientId=" + clientId);
@@ -114,6 +118,9 @@ int main(int argc, char** argv)
     options.assetRoot = assetRoot;
     options.sourceFilePath = sourceFilePath;
     options.localOutputPath = localOutputPath;
+    options.namedRouteId = namedRouteId;
+    options.namedRouteClientRoot = namedRouteClientRoot;
+    options.namedRouteRelativeDirectory = namedRouteRelativeDirectory;
     options.serverLogPath = serverLogPath;
 
     notch_mock::MatrixSummary summary = notch_mock::RunConformance(http, ws, options, logger, cudaReaderPtr);

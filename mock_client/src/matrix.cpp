@@ -396,7 +396,7 @@ std::string ReadFileSlice(const std::string& path, long start, long end)
     return buffer;
 }
 
-bool ContainsTransport(const std::vector<std::string>& values, const std::string& target)
+bool ContainsString(const std::vector<std::string>& values, const std::string& target)
 {
     for (size_t i = 0; i < values.size(); ++i)
     {
@@ -406,6 +406,69 @@ bool ContainsTransport(const std::vector<std::string>& values, const std::string
         }
     }
     return false;
+}
+
+bool IsSafeRelativePath(const std::string& path)
+{
+    if (path.empty() || path[0] == '/' || path[0] == '\\')
+    {
+        return false;
+    }
+    if (path.size() >= 2U && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':')
+    {
+        return false;
+    }
+    std::string segment;
+    for (size_t i = 0; i <= path.size(); ++i)
+    {
+        const char c = i < path.size() ? path[i] : '/';
+        if (c == '/' || c == '\\')
+        {
+            if (segment == "..")
+            {
+                return false;
+            }
+            segment.clear();
+        }
+        else
+        {
+            segment.push_back(c);
+        }
+    }
+    return true;
+}
+
+std::string JoinPath(const std::string& root, const std::string& relativePath)
+{
+    if (root.empty())
+    {
+        return relativePath;
+    }
+    if (relativePath.empty())
+    {
+        return root;
+    }
+    if (root[root.size() - 1U] == '/' || root[root.size() - 1U] == '\\')
+    {
+        return root + relativePath;
+    }
+    return root + "/" + relativePath;
+}
+
+std::string NamedRouteRelativeDirectory(const MatrixOptions& options)
+{
+    if (!options.namedRouteRelativeDirectory.empty())
+    {
+        return options.namedRouteRelativeDirectory;
+    }
+    return "remote-route";
+}
+
+bool NamedRouteConfiguredForClient(const MatrixOptions& options,
+                                   const notch_comfy::ServerDeploymentFacts& deployment)
+{
+    return !options.namedRouteId.empty() && !options.namedRouteClientRoot.empty() &&
+           ContainsString(deployment.m_namedDiskRouteIds, options.namedRouteId);
 }
 
 // CUDA IPC mem-handle import does not work on WSL2 GPU-PV: a valid, integrity-
@@ -449,6 +512,23 @@ std::vector<std::string> ClientReachableTransports(Phase phase)
         return std::vector<std::string>{"http"};
     }
     return std::vector<std::string>{"cuda", "disk", "http"};
+}
+
+std::vector<std::string> ClientReachableTransports(
+    Phase phase,
+    bool namedRouteDisk,
+    const MatrixOptions& options,
+    const notch_comfy::ServerDeploymentFacts& deployment)
+{
+    if (phase != Phase::DeliveryRemote)
+    {
+        return std::vector<std::string>{"cuda", "disk", "http"};
+    }
+    if (namedRouteDisk && NamedRouteConfiguredForClient(options, deployment))
+    {
+        return std::vector<std::string>{"disk", "http"};
+    }
+    return std::vector<std::string>{"http"};
 }
 
 std::string ExtensionFromPath(const std::string& path)
@@ -696,6 +776,8 @@ std::string OutputReadyJson(const notch_comfy::OutputReady& output)
          << ",\"prompt_id\":" << CaseLogger::Quote(output.m_promptId)
          << ",\"transport\":" << CaseLogger::Quote(output.m_transport)
          << ",\"path\":" << CaseLogger::Quote(output.m_path)
+         << ",\"named_route_id\":" << CaseLogger::Quote(output.m_namedRouteId)
+         << ",\"relative_path\":" << CaseLogger::Quote(output.m_relativePath)
          << ",\"url\":" << CaseLogger::Quote(output.m_url)
          << ",\"type\":" << CaseLogger::Quote(output.m_type)
          << ",\"format\":" << CaseLogger::Quote(output.m_format)
@@ -897,7 +979,8 @@ void RunFilePathDeliveryCase(
     const std::string& title,
     const std::string& description,
     const std::string& transport,
-    bool expectSuccess)
+    bool expectSuccess,
+    bool useNamedRouteDisk = false)
 {
     CaseRecord rec;
     rec.caseId = caseId;
@@ -907,7 +990,8 @@ void RunFilePathDeliveryCase(
     rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
     rec.requiredTransport = transport;
 
-    const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
+    const std::vector<std::string> clientReachable =
+        ClientReachableTransports(options.phase, useNamedRouteDisk, options, deployment);
     notch_comfy::OutputTransportOptions selectionOptions;
     selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"disk", "http"};
     selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
@@ -919,6 +1003,8 @@ void RunFilePathDeliveryCase(
     negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
                 << ",\"server_available\":" << CaseLogger::Array(selectionOptions.m_serverAvailableTransports)
                 << ",\"client_reachable\":" << CaseLogger::Array(selectionOptions.m_clientReachableTransports)
+                << ",\"server_named_route_ids\":" << CaseLogger::Array(deployment.m_namedDiskRouteIds)
+                << ",\"named_route_id\":" << CaseLogger::Quote(useNamedRouteDisk ? options.namedRouteId : "")
                 << ",\"required_transport\":" << CaseLogger::Quote(transport)
                 << ",\"choice\":" << ChoiceJson(choice) << "}";
 
@@ -978,7 +1064,15 @@ void RunFilePathDeliveryCase(
     req.m_output.m_extension = ExtensionFromPath(sourcePath);
     if (transport == "disk")
     {
-        req.m_output.m_path = DefaultLocalOutputPath(options);
+        if (useNamedRouteDisk)
+        {
+            req.m_output.m_namedRouteId = options.namedRouteId;
+            req.m_output.m_relativeDirectory = NamedRouteRelativeDirectory(options);
+        }
+        else
+        {
+            req.m_output.m_path = DefaultLocalOutputPath(options);
+        }
         req.m_output.m_filenamePrefix = caseId;
     }
 
@@ -1039,8 +1133,27 @@ void RunFilePathDeliveryCase(
     {
         if (transport == "disk")
         {
-            outputPath = state.output.m_path;
-            outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
+            if (useNamedRouteDisk)
+            {
+                if (state.output.m_namedRouteId != options.namedRouteId)
+                {
+                    outputError = "named_route_id mismatch";
+                }
+                else if (!IsSafeRelativePath(state.output.m_relativePath))
+                {
+                    outputError = "unsafe or empty relative_path";
+                }
+                else
+                {
+                    outputPath = JoinPath(options.namedRouteClientRoot, state.output.m_relativePath);
+                    outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
+                }
+            }
+            else
+            {
+                outputPath = state.output.m_path;
+                outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
+            }
         }
         else if (transport == "http")
         {
@@ -1065,6 +1178,9 @@ void RunFilePathDeliveryCase(
     const std::string inputHash = Sha256Bytes(sourceBytes);
     const std::string outputHash = outputRead ? Sha256Bytes(outputBytes) : "";
     const bool hashMatch = outputRead && inputHash == outputHash;
+    const bool namedRouteHandoffOk = !useNamedRouteDisk ||
+        (state.outputReady && state.output.m_namedRouteId == options.namedRouteId &&
+         IsSafeRelativePath(state.output.m_relativePath) && state.output.m_path.empty());
     std::string diagnosticsJson;
     std::string diagnosticsError;
     const bool diagnosticsFetched = state.promptId.empty()
@@ -1098,7 +1214,8 @@ void RunFilePathDeliveryCase(
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    const bool ok = state.queued && state.terminalSuccess && state.outputReady && hashMatch;
+    const bool ok = state.queued && state.terminalSuccess && state.outputReady &&
+                    namedRouteHandoffOk && hashMatch;
     if (!state.queued)
     {
         rec.errors.push_back("unexpected_reject");
@@ -1115,6 +1232,10 @@ void RunFilePathDeliveryCase(
     {
         rec.errors.push_back("output_artifact_missing");
     }
+    if (state.outputReady && !namedRouteHandoffOk)
+    {
+        rec.errors.push_back("named_route_handoff_mismatch");
+    }
     if (outputRead && !hashMatch)
     {
         rec.errors.push_back("output_hash_mismatch");
@@ -1127,6 +1248,8 @@ void RunFilePathDeliveryCase(
            << "\"outputs\":[{\"name\":" << CaseLogger::Quote(consumerId)
            << ",\"transport\":" << CaseLogger::Quote(transport)
            << ",\"path\":" << CaseLogger::Quote(outputPath)
+           << ",\"named_route_id\":" << CaseLogger::Quote(state.output.m_namedRouteId)
+           << ",\"relative_path\":" << CaseLogger::Quote(state.output.m_relativePath)
            << ",\"bytes\":" << outputBytes.size()
            << ",\"sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"comparison\":\"exact_file_copy\"}]}";
@@ -1138,6 +1261,7 @@ void RunFilePathDeliveryCase(
            << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
            << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
+           << ",\"named_route_handoff_ok\":" << CaseLogger::Bool(namedRouteHandoffOk)
            << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
            << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
            << ",\"diagnostics_missing_events\":" << CaseLogger::Array(missingDiagnostics)
@@ -1152,7 +1276,7 @@ void RunFilePathDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"hash_match\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"named_route_handoff_ok\":true,\"hash_match\":true}";
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
@@ -1214,7 +1338,7 @@ void RunCudaDeliveryCase(
         return;
     }
 
-    if (!choice.m_ok || !ContainsTransport(selectionOptions.m_serverAvailableTransports, "cuda") ||
+    if (!choice.m_ok || !ContainsString(selectionOptions.m_serverAvailableTransports, "cuda") ||
         deployment.m_cudaDeviceIndex < 0)
     {
         rec.expectedJson = "{\"cuda_available\":true}";
@@ -1796,6 +1920,13 @@ void RunDeliveryCases(
             "The remote client exposes only HTTP reachability, so a hard disk request must be rejected by client-side transport selection before inject; no silent downgrade is allowed.",
             "disk",
             false);
+        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment,
+            "remote-file-path-named-route-disk",
+            "Remote file path output over named-route disk preserves bytes",
+            "From a separate client container, require disk output through a configured named route, receive named_route_id plus relative_path, resolve that relative path under the client route root, and compare SHA-256 with the source file.",
+            "disk",
+            true,
+            true);
         RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment,
             cudaReader,
             "remote-image-cuda-rejected",

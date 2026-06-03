@@ -730,6 +730,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torch-index-url", default="https://download.pytorch.org/whl/cu130")
     parser.add_argument("--install-torch", choices=["true", "false"], default="true")
     parser.add_argument("--expected-node-classes", default=",".join(NOTCH_NODE_CLASSES))
+    parser.add_argument("--named-route-id", default="")
+    parser.add_argument("--named-route-server-root", default="")
+    parser.add_argument("--named-route-client-root", default="")
+    parser.add_argument("--named-route-relative-directory", default="remote-route")
     return parser.parse_args()
 
 
@@ -822,6 +826,11 @@ def main() -> int:
                 "extension_commit": git_commit(runner, workspace) if (workspace / ".git").exists() else "",
                 "server_url": base_url,
                 "server_feature_flags": remote_features.get("extension", {}).get("notch", {}),
+                "named_route": {
+                    "named_route_id": args.named_route_id,
+                    "client_root": args.named_route_client_root,
+                    "relative_directory": args.named_route_relative_directory,
+                },
             }
             write_json(artifacts / "environment.json", environment)
 
@@ -840,6 +849,15 @@ def main() -> int:
                 "--server-log",
                 str(artifacts / "server" / "comfyui.log"),
             ]
+            if args.named_route_id and args.named_route_client_root:
+                mock_command += [
+                    "--named-route-id",
+                    args.named_route_id,
+                    "--named-route-client-root",
+                    args.named_route_client_root,
+                    "--named-route-relative-directory",
+                    args.named_route_relative_directory,
+                ]
             run = runner.run(mock_command, log_name="mock-client.log", check=False)
             conformance_result: dict[str, Any] = {}
             conformance_path = artifacts / result_filename
@@ -895,6 +913,22 @@ def main() -> int:
         # Run the server with NOTCH_CI so it captures prompt-scoped WARNING+ logs
         # and explicit CI decision events for GET /notch/diagnostics. Mirror the
         # same records to a JSONL artifact; the matrix collects them per case.
+        server_extra_env = {
+            "NOTCH_CI": "1",
+            "NOTCH_CI_LOG": str(artifacts / "notch-ci.jsonl"),
+        }
+        if args.named_route_id and args.named_route_server_root:
+            server_extra_env["NOTCH_NAMED_ROUTES"] = json.dumps(
+                {
+                    "routes": [
+                        {
+                            "named_route_id": args.named_route_id,
+                            "server_root": args.named_route_server_root,
+                        }
+                    ]
+                }
+            )
+
         server = start_comfy_server(
             python,
             comfy_dir,
@@ -902,10 +936,7 @@ def main() -> int:
             args.port,
             args.comfyui_flags,
             artifacts / "comfyui.log",
-            extra_env={
-                "NOTCH_CI": "1",
-                "NOTCH_CI_LOG": str(artifacts / "notch-ci.jsonl"),
-            },
+            extra_env=server_extra_env,
         )
         poll_url(f"{base_url}/queue", args.timeout)
         result["checks"]["server_started"] = True
@@ -932,6 +963,11 @@ def main() -> int:
             "server_url": base_url,
             "server_feature_flags": server_features.get("extension", {}).get("notch", {}),
             "expected_node_classes": expected_nodes,
+            "named_route": {
+                "named_route_id": args.named_route_id,
+                "server_root": args.named_route_server_root,
+                "relative_directory": args.named_route_relative_directory,
+            },
         }
         write_json(artifacts / "environment.json", environment)
         result.update(

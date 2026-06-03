@@ -89,6 +89,12 @@ struct MatrixOptions
     std::string assetRoot;
     std::string sourceFilePath;
     std::string localOutputPath;
+    // Named-route disk handoff used by the remote delivery topology. The server
+    // advertises namedRouteId in /features; the client maps the same id to its
+    // own local root and joins the ready event's relative_path under it.
+    std::string namedRouteId;
+    std::string namedRouteClientRoot;
+    std::string namedRouteRelativeDirectory;
     std::string serverLogPath;
     int wsTimeoutMs = 5000;        // handshake budget
     int executeTimeoutMs = 90000;  // budget to wait for a terminal execution event

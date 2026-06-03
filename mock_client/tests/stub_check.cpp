@@ -166,6 +166,21 @@ int main()
         }
         assert(remotePositives == 7);
         assert(remoteReachabilityRejects == 8);
+
+        // remote-route-disk topology: a matching server/client named route makes
+        // disk reachable again, but cuda remains host-local and unreachable.
+        const std::vector<std::string> routeDiskClient = {"disk", "http"};
+        int remoteRoutePositives = 0;
+        int remoteRouteRejects = 0;
+        for (const auto& type : notch_mock::DeliveryTypes())
+        {
+            const auto usable = notch_mock::UsableTransports(type, fullServer, routeDiskClient);
+            remoteRoutePositives += static_cast<int>(usable.size());
+            remoteRouteRejects +=
+                static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
+        }
+        assert(remoteRoutePositives == 14);
+        assert(remoteRouteRejects == 1);
     }
     std::printf("delivery type-table cardinality assertions OK\n");
     return 0;

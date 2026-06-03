@@ -3,7 +3,7 @@ description: "Verify the notch_comfy_client C++ interface conforms to the ComfyU
 
 inputs:
   mode:
-    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs discovery + transport-negotiation + readiness. delivery_local runs local disk/http/cuda delivery. delivery_remote runs a two-container remote HTTP/reachability delivery check."
+    description: "Conformance phase. extension_boot starts ComfyUI, verifies /object_info and /features, and compiles the C++ client interface. protocol_negotiation runs discovery + transport-negotiation + readiness. delivery_local runs local disk/http/cuda delivery. delivery_remote runs a two-container remote HTTP, named-route disk, and reachability delivery check."
     required: false
     default: "extension_boot"
   comfyui_repository:
@@ -261,7 +261,14 @@ runs:
         $networkName = "notch-contract-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
         $serverName = "$networkName-server"
         $serverArtifacts = Join-Path $artifactHost "server"
+        $namedRouteId = "ci_shared_output"
+        $namedRouteServerRoot = "/srv/notch-named-routes/$namedRouteId"
+        $namedRouteClientRoot = "/mnt/notch-named-routes/$namedRouteId"
+        $namedRouteRelativeDirectory = "remote-route"
+        $namedRouteHost = Join-Path $artifactHost "named-routes"
+        $namedRouteHostRoot = Join-Path $namedRouteHost $namedRouteId
         New-Item -ItemType Directory -Force -Path $serverArtifacts | Out-Null
+        New-Item -ItemType Directory -Force -Path $namedRouteHostRoot | Out-Null
 
         if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
           & nvidia-smi *> (Join-Path $artifactHost "host-nvidia-smi.txt")
@@ -304,6 +311,7 @@ runs:
             "-v", "$($actionPath):/action:ro",
             "-v", "$($artifactHost):/artifacts",
             "-v", "$($pipCacheHost):/cache/pip",
+            "-v", "$($namedRouteHostRoot):$namedRouteServerRoot",
             "${{ inputs.docker_image }}",
             "--mode", "delivery_remote_server",
             "--comfyui-repository", "${{ inputs.comfyui_repository }}",
@@ -318,7 +326,10 @@ runs:
             "--comfyui-flags=${{ inputs.comfyui_flags }}",
             "--torch-index-url", "${{ inputs.torch_index_url }}",
             "--install-torch", "${{ inputs.install_torch }}",
-            "--expected-node-classes", "${{ inputs.expected_node_classes }}"
+            "--expected-node-classes", "${{ inputs.expected_node_classes }}",
+            "--named-route-id", $namedRouteId,
+            "--named-route-server-root", $namedRouteServerRoot,
+            "--named-route-relative-directory", $namedRouteRelativeDirectory
           )
           & docker @serverArgs
           if ($LASTEXITCODE -ne 0) {
@@ -341,6 +352,7 @@ runs:
             "-v", "$($actionPath):/action:ro",
             "-v", "$($artifactHost):/artifacts",
             "-v", "$($pipCacheHost):/cache/pip",
+            "-v", "$($namedRouteHostRoot):$namedRouteClientRoot",
             "${{ inputs.docker_image }}",
             "--mode", "delivery_remote_client",
             "--comfyui-repository", "${{ inputs.comfyui_repository }}",
@@ -355,7 +367,10 @@ runs:
             "--comfyui-flags=${{ inputs.comfyui_flags }}",
             "--torch-index-url", "${{ inputs.torch_index_url }}",
             "--install-torch", "${{ inputs.install_torch }}",
-            "--expected-node-classes", "${{ inputs.expected_node_classes }}"
+            "--expected-node-classes", "${{ inputs.expected_node_classes }}",
+            "--named-route-id", $namedRouteId,
+            "--named-route-client-root", $namedRouteClientRoot,
+            "--named-route-relative-directory", $namedRouteRelativeDirectory
           )
           & docker @clientArgs
           if ($LASTEXITCODE -ne 0) {

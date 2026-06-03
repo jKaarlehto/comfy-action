@@ -27,7 +27,9 @@ const std::vector<DeliveryTypeContract>& DeliveryTypes();
 // type-allowed transports: image -> {cuda,disk,http}; everything else -> {disk,http}.
 std::vector<std::string> TypeAllowedTransports(const DeliveryTypeContract& type);
 
-// Realizable client-reachable set per topology (route-disk added later).
+// Realizable client-reachable set per currently selected live topology. The
+// route-disk reachable set is exercised per case because delivery_remote runs
+// both http-only rejects and named-route disk positives in one job.
 std::vector<std::string> TopologyReachable(Phase phase);
 
 // usable = type-allowed n server-available n client-reachable.
