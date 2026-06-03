@@ -8,10 +8,6 @@ name: Notch-Comfy conformance (stub self-test)
 # the heavy self-hosted conformance jobs run.
 
 on:
-  push:
-    paths:
-      - 'mock_client/**'
-      - '.github/workflows/notch-conformance-stub.yml'
   workflow_dispatch:
     inputs:
       extension_repository:
