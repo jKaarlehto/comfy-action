@@ -14,8 +14,8 @@ Notch node classes and server feature facts.
 
 - clone ComfyUI at `comfyui_ref`;
 - copy or clone `ComfyUI-Notch` into `ComfyUI/custom_nodes/ComfyUI-Notch`;
-- create an isolated Python virtual environment inside the container;
-- install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies;
+- use the container-owned Python environment managed by uv;
+- install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies with uv;
 - build and run `cpp/notch_comfy_client`'s compile-check target;
 - start ComfyUI on `<listen_address>:<port>` and poll the same address;
 - assert `/features` includes Notch compatibility facts;
@@ -99,13 +99,13 @@ checks on a floating branch.
 | `port` | `8188` | ComfyUI port inside the container. |
 | `timeout` | `180` | Seconds to wait for server startup. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `python main.py`. |
-| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch pip index (NVIDIA stable, used as `--extra-index-url`). |
-| `install_torch` | `true` | Install torch/torchvision/torchaudio before ComfyUI requirements. |
+| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch package index (NVIDIA stable, passed to uv as `--index`). |
+| `install_torch` | `true` | Ensure torch/torchvision/torchaudio are installed before ComfyUI requirements. |
 | `use_gpu` | `auto` | `true`, `false`, or `auto`. `auto` probes `docker run --gpus all`. |
 | `docker_image` | `notch-contract-ci:local` | Local image tag. |
 | `docker_no_cache` | `false` | Build with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
-| `pip_cache_dir` | `notch-contract-pip-cache` | Shared pip wheel cache under the runner workspace, mounted at `/cache/pip` and reused across both jobs and between runs. |
+| `uv_cache_dir` | `notch-contract-uv-cache` | Shared uv package cache under the runner workspace, mounted at `/cache/uv` and reused across jobs and between runs. |
 | `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-boot expectation. |
 
@@ -119,7 +119,7 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `git.log`
 - `environment.json`
 - `python-env.json`
-- `pip-freeze.txt`
+- `pip-freeze.txt` generated via `uv pip freeze`
 - `server-feature-flags.json`
 - `cuda-diagnostics.json`
 - `cuda-ipc-probe.json`

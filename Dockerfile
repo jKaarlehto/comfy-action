@@ -1,3 +1,7 @@
+# syntax=docker/dockerfile:1.7
+ARG UV_VERSION=0.9.9
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 # CUDA 13 base to match the ComfyUI NVIDIA stable install (torch cu130). Pin the
 # exact patch tag to one available on your registry / supported by the runner
 # driver; CUDA 13 requires a recent NVIDIA driver on the self-hosted host.
@@ -5,13 +9,16 @@ FROM nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-# Reuse downloaded wheels across both jobs via the /cache/pip bind mount the
+ENV UV_CACHE_DIR=/cache/uv
+ENV UV_LINK_MODE=copy
+# Reuse downloaded wheels across both jobs via the /cache/uv bind mount the
 # action provides. If the mount is absent the cache is just container-local.
-ENV PIP_CACHE_DIR=/cache/pip
 
 # Python 3.13 is ComfyUI's recommended interpreter; install it from deadsnakes
-# (Ubuntu 24.04 ships 3.12). The venv module bootstraps pip via ensurepip.
+# (Ubuntu 24.04 ships 3.12). uv installs runtime deps into this container-owned
+# Python environment.
+COPY --from=uv /uv /uvx /usr/local/bin/
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gnupg \
@@ -32,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     python3.13 \
     python3.13-dev \
-    python3.13-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python3.13 /usr/local/bin/python
@@ -40,12 +46,11 @@ RUN ln -sf /usr/bin/python3.13 /usr/local/bin/python
 # Bake torch (the heaviest, slowest-changing dependency) into its own early
 # layer so Docker caches it: it is re-downloaded only when this line changes,
 # not every run. Keep TORCH_INDEX_URL in sync with the action's torch_index_url
-# input (NVIDIA stable cu130). The runtime venv inherits this via
-# system-site-packages and skips re-installing torch.
+# input (NVIDIA stable cu130). Runtime installs use the same system Python, so
+# uv treats baked torch as already satisfied and skips re-installing it.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
-RUN python -m ensurepip --upgrade \
-    && python -m pip install --no-cache-dir --upgrade pip wheel setuptools \
-    && python -m pip install --no-cache-dir torch torchvision torchaudio --extra-index-url ${TORCH_INDEX_URL}
+RUN --mount=type=cache,target=/cache/uv \
+    uv pip install --system torch torchvision torchaudio --index ${TORCH_INDEX_URL}
 
 WORKDIR /runner
 # Bake the runner and the mock client source so the image is self-contained; the

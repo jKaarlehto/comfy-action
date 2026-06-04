@@ -56,7 +56,7 @@ The container mounts:
 <caller workspace>       -> /workspace
 <action checkout>        -> /action:ro
 <caller artifact dir>    -> /artifacts
-<runner pip cache>       -> /cache/pip
+<runner uv cache>        -> /cache/uv
 ```
 
 Everything else under `/work/notch-contract-ci` is run-owned container state and
@@ -123,13 +123,13 @@ Keep configuration small:
 | `port` | `8188` | Local ComfyUI HTTP port inside the container. |
 | `timeout` | `180` | Seconds to wait for ComfyUI to become reachable. |
 | `comfyui_flags` | `--disable-auto-launch` | Extra flags passed to `main.py`. |
-| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch pip index URL used inside the container (NVIDIA stable per the ComfyUI manual-install spec; passed as `--extra-index-url`). |
-| `install_torch` | `true` | Install Torch before ComfyUI requirements. |
+| `torch_index_url` | `https://download.pytorch.org/whl/cu130` | PyTorch package index URL used inside the container (NVIDIA stable per the ComfyUI manual-install spec; passed to uv as `--index`). |
+| `install_torch` | `true` | Ensure Torch is installed before ComfyUI requirements. |
 | `use_gpu` | `auto` | `true`, `false`, or `auto`. `auto` probes `docker run --gpus all`. |
 | `docker_image` | `notch-contract-ci:local` | Local Docker image tag for the runner. |
 | `docker_no_cache` | `false` | Build the image with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Simple path under the caller workspace. Cleared at the start of each run. |
-| `pip_cache_dir` | `notch-contract-pip-cache` | Simple path under the self-hosted runner workspace mounted as `/cache/pip`. Shared by both jobs on the same runner so the matrix job can reuse downloaded wheels. |
+| `uv_cache_dir` | `notch-contract-uv-cache` | Simple path under the self-hosted runner workspace mounted as `/cache/uv`. Shared by jobs on the same runner so later jobs can reuse downloaded wheels and metadata. |
 | `upload_artifacts` | `true` | Upload `artifact_dir` with `actions/upload-artifact`. |
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated class names expected in `/object_info`. Spout is Windows-only and excluded from the Linux Docker extension-boot expectation. |
 
@@ -151,9 +151,9 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
    ComfyUI/custom_nodes/ComfyUI-Notch
    ```
 
-5. Create a fresh Python virtual environment inside the container.
-6. Install Torch, ComfyUI requirements, and the custom node requirements.
-7. Write `pip-freeze.txt` and `python-env.json`.
+5. Use the container-owned Python environment managed by uv.
+6. Install Torch, ComfyUI requirements, and the custom node requirements with uv.
+7. Write `pip-freeze.txt` (via `uv pip freeze`) and `python-env.json`.
 8. Build and run the C++ compile-check target:
 
    ```text
@@ -610,26 +610,30 @@ Clean every run:
 - The container `/work/notch-contract-ci` directory.
 - ComfyUI checkout/worktree for the run.
 - Installed `custom_nodes/ComfyUI-Notch` copy.
-- Python virtual environment.
+- Python packages installed into the run-owned container environment.
 - C++ build directory.
 - ComfyUI `input`, `output`, `temp`, and test artifact folders used by the run.
 - Started ComfyUI process and any child process created by the workflow.
 
 Safe to cache or reuse:
 
-- Docker image layers. **torch (and its full CUDA dependency closure) is baked
-  into an early image layer** (`pip install torch torchvision torchaudio`), so
-  the multi-GB download — torch plus every `nvidia-*-cu13` wheel (cuBLAS, cuDNN,
-  cuFFT, cuSPARSE, cuSOLVER, NCCL, nvrtc, …), `triton`, and `cuda-bindings` — is
-  pulled only when that Dockerfile line changes, not every run. The layer sits
-  before any code `COPY`, so editing the runner or mock client does not bust it.
-  The runtime venv inherits it via system-site-packages and skips re-installing
-  torch.
-- Pip wheel/download cache mounted at `/cache/pip`, shared across both jobs. The
-  virtual environment is still rebuilt every run; only package downloads are
-  reused. This covers the **ComfyUI and extension `requirements.txt`** deps,
-  which vary by `comfyui_ref` and so are not baked. `pip-freeze.txt` and
-  `python-env.json` record the exact installed environment.
+- Docker image layers and the Docker BuildKit uv cache. **torch (and its full
+  CUDA dependency closure) is baked into an early image layer**
+  (`uv pip install torch torchvision torchaudio`), so the multi-GB install —
+  torch plus every `nvidia-*-cu13` wheel (cuBLAS, cuDNN, cuFFT, cuSPARSE,
+  cuSOLVER, NCCL, nvrtc, …), `triton`, and `cuda-bindings` — is pulled only when
+  that Dockerfile line changes, not every run. If the layer is invalidated,
+  BuildKit still reuses uv's build cache for downloads. The layer sits before
+  any code `COPY`, so editing the runner or mock client does not bust it.
+  Runtime installs use the same system Python, so uv treats baked torch as
+  already satisfied and skips re-installing it.
+- uv package cache mounted at `/cache/uv`, shared across jobs. The virtual
+  Python environment is still rebuilt with the disposable container every run;
+  only package downloads and package metadata are reused. This covers the
+  **ComfyUI and extension
+  `requirements.txt`** deps, which vary by `comfyui_ref` and so are not baked.
+  `pip-freeze.txt` (generated by `uv pip freeze`) and `python-env.json` record
+  the exact installed environment.
 - Optional model cache for future model-backed suites. The current four-job
   conformance flow uses small checked-in fixtures and should not depend on a
   mutable model cache.
@@ -645,8 +649,9 @@ Do not cache:
 - C++ build outputs as authoritative test inputs. Rebuild from source each run.
 
 Default policy: build and install from source every run; cache only Docker image
-layers and package downloads. Do not reuse worktrees, virtual environments,
-runtime outputs, or C++ build trees as authoritative test inputs.
+layers and uv package downloads/metadata. Do not reuse worktrees, installed
+runtime environments, runtime outputs, or C++ build trees as authoritative test
+inputs.
 
 ## Last-Known-Good Record
 

@@ -39,11 +39,11 @@ inputs:
     required: false
     default: "--disable-auto-launch"
   torch_index_url:
-    description: "PyTorch pip index URL used inside the container."
+    description: "PyTorch package index URL used inside the container."
     required: false
     default: "https://download.pytorch.org/whl/cu130"
   install_torch:
-    description: "Install torch/torchvision/torchaudio before ComfyUI requirements."
+    description: "Ensure torch/torchvision/torchaudio are installed before ComfyUI requirements."
     required: false
     default: "true"
   use_gpu:
@@ -62,10 +62,10 @@ inputs:
     description: "Directory under the caller workspace where run artifacts are written."
     required: false
     default: "notch-contract-artifacts"
-  pip_cache_dir:
-    description: "Simple path under the self-hosted runner workspace, mounted as /cache/pip and shared across both jobs so downloaded wheels are reused. Persists between runs (not cleaned)."
+  uv_cache_dir:
+    description: "Simple path under the self-hosted runner workspace, mounted as /cache/uv and shared across jobs so downloaded wheels are reused. Persists between runs (not cleaned)."
     required: false
-    default: "notch-contract-pip-cache"
+    default: "notch-contract-uv-cache"
   upload_artifacts:
     description: "Upload artifact_dir with actions/upload-artifact."
     required: false
@@ -94,29 +94,31 @@ runs:
         }
         New-Item -ItemType Directory -Force -Path $artifactPath | Out-Null
 
-    - name: "[Docker] Prepare shared pip cache directory"
+    - name: "[Docker] Prepare shared uv cache directory"
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-        $pipCacheRel = "${{ inputs.pip_cache_dir }}"
-        if ([string]::IsNullOrWhiteSpace($pipCacheRel) -or $pipCacheRel -eq "." -or $pipCacheRel -eq ".." -or [System.IO.Path]::IsPathRooted($pipCacheRel) -or $pipCacheRel.Contains("..") -or $pipCacheRel.Contains("\") -or $pipCacheRel.Contains(":")) {
-          Write-Error "pip_cache_dir must be a simple path under the runner workspace: $pipCacheRel"
+        $uvCacheRel = "${{ inputs.uv_cache_dir }}"
+        if ([string]::IsNullOrWhiteSpace($uvCacheRel) -or $uvCacheRel -eq "." -or $uvCacheRel -eq ".." -or [System.IO.Path]::IsPathRooted($uvCacheRel) -or $uvCacheRel.Contains("..") -or $uvCacheRel.Contains("\") -or $uvCacheRel.Contains(":")) {
+          Write-Error "uv_cache_dir must be a simple path under the runner workspace: $uvCacheRel"
           exit 2
         }
         # RUNNER_WORKSPACE persists across both jobs and between runs on a
         # self-hosted runner, and sits outside the per-run-cleaned checkout.
-        $pipCachePath = Join-Path $env:RUNNER_WORKSPACE $pipCacheRel
-        New-Item -ItemType Directory -Force -Path $pipCachePath | Out-Null
-        Write-Host "Shared pip cache: $pipCachePath -> /cache/pip"
+        $uvCachePath = Join-Path $env:RUNNER_WORKSPACE $uvCacheRel
+        New-Item -ItemType Directory -Force -Path $uvCachePath | Out-Null
+        Write-Host "Shared uv cache: $uvCachePath -> /cache/uv"
 
     - name: "[Docker] Build contract runner image"
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
+        $env:DOCKER_BUILDKIT = "1"
         $dockerArgs = @("build")
         if ("${{ inputs.docker_no_cache }}" -eq "true") {
           $dockerArgs += "--no-cache"
         }
+        $dockerArgs += @("--build-arg", "TORCH_INDEX_URL=${{ inputs.torch_index_url }}")
         $dockerArgs += @("-t", "${{ inputs.docker_image }}", "${{ github.action_path }}")
         & docker @dockerArgs
         if ($LASTEXITCODE -ne 0) {
@@ -129,7 +131,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         $artifactHost = Join-Path $env:GITHUB_WORKSPACE "${{ inputs.artifact_dir }}"
-        $pipCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.pip_cache_dir }}"
+        $uvCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.uv_cache_dir }}"
         $gpuArgs = @()
 
         if ("${{ inputs.use_gpu }}" -eq "true") {
@@ -196,7 +198,7 @@ runs:
           "-v", "$($env:GITHUB_WORKSPACE):/workspace",
           "-v", "$($actionPath):/action:ro",
           "-v", "$($artifactHost):/artifacts",
-          "-v", "$($pipCacheHost):/cache/pip",
+          "-v", "$($uvCacheHost):/cache/uv",
           "${{ inputs.docker_image }}",
           "--mode", "${{ inputs.mode }}",
           "--comfyui-repository", "${{ inputs.comfyui_repository }}",
@@ -230,7 +232,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         $artifactHost = Join-Path $env:GITHUB_WORKSPACE "${{ inputs.artifact_dir }}"
-        $pipCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.pip_cache_dir }}"
+        $uvCacheHost = Join-Path $env:RUNNER_WORKSPACE "${{ inputs.uv_cache_dir }}"
         $gpuArgs = @()
 
         if ("${{ inputs.use_gpu }}" -eq "true") {
@@ -309,7 +311,7 @@ runs:
             "-v", "$($env:GITHUB_WORKSPACE):/workspace:ro",
             "-v", "$($actionPath):/action:ro",
             "-v", "$($artifactHost):/artifacts",
-            "-v", "$($pipCacheHost):/cache/pip",
+            "-v", "$($uvCacheHost):/cache/uv",
             "-v", "$($namedRouteHostRoot):$namedRouteServerRoot",
             "${{ inputs.docker_image }}",
             "--mode", "delivery_remote_server",
@@ -350,7 +352,7 @@ runs:
             "-v", "$($env:GITHUB_WORKSPACE):/workspace:ro",
             "-v", "$($actionPath):/action:ro",
             "-v", "$($artifactHost):/artifacts",
-            "-v", "$($pipCacheHost):/cache/pip",
+            "-v", "$($uvCacheHost):/cache/uv",
             "-v", "$($namedRouteHostRoot):$namedRouteClientRoot",
             "${{ inputs.docker_image }}",
             "--mode", "delivery_remote_client",
