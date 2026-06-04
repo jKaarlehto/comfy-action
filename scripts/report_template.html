@@ -175,7 +175,7 @@ function jobSection(job) {
   else body.appendChild(el("div", "empty", "no cases recorded"));
 
   if (job.diagnostics && job.diagnostics.length) {
-    const dg = el("details", "block"); dg.appendChild(el("summary", null, `diagnostics (${job.diagnostics.length}, context only — never a verdict)`));
+    const dg = el("details", "block"); dg.appendChild(el("summary", null, `run-level diagnostics — unattributed to any case (${job.diagnostics.length}; per-case breadcrumbs are on each case)`));
     for (const d of job.diagnostics) {
       const row = el("div", "diag");
       row.dataset.search = (d.severity + " " + d.name + " " + d.message).toLowerCase();

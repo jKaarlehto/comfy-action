@@ -122,6 +122,37 @@ def test_render_escapes_data_breakout():
     assert "<img" not in match.group(1)
 
 
+def test_run_level_diagnostics_attributed_per_case_by_prompt_id():
+    # The run-level notch-ci.jsonl stream must be split by prompt_id and attached to
+    # each case (its breadcrumb), leaving only unattributed records at job level.
+    import shutil
+    import tempfile
+
+    job = tempfile.mkdtemp()
+    case_dir = os.path.join(job, "conformance", "cases", "001-x.deliver")
+    os.makedirs(case_dir)
+    with open(os.path.join(case_dir, "case.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {"case_id": "x.deliver", "title": "x", "phase": "delivery-local", "result": "pass",
+             "errors": [], "expected": {}, "actual": {"prompt_id": "P1"}},
+            handle,
+        )
+    with open(os.path.join(job, "conformance-result.json"), "w", encoding="utf-8") as handle:
+        json.dump({"phase": "delivery_local", "result": "pass", "totals": {"pass": 1, "fail": 0, "skip": 0, "error": 0}}, handle)
+    with open(os.path.join(job, "notch-ci.jsonl"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"kind": "event", "event": "inject.request_parsed", "prompt_id": "P1"}) + "\n")
+        handle.write(json.dumps({"kind": "event", "event": "output_node.delivery_done", "prompt_id": "P1"}) + "\n")
+        handle.write(json.dumps({"kind": "log", "severity": "WARNING", "message": "startup note", "prompt_id": ""}) + "\n")
+
+    normalized = normalize_job("delivery_local", "Local delivery", job)
+    case = normalized["cases"][0]
+    assert case["diagnostics"]["events"] == ["inject.request_parsed", "output_node.delivery_done"]
+    # only the prompt-less record stays at job level
+    assert len(normalized["diagnostics"]) == 1
+    assert normalized["diagnostics"][0]["message"] == "startup note"
+    shutil.rmtree(job)
+
+
 def test_per_case_diagnostics_structured():
     diag = {
         "ci_enabled": True,

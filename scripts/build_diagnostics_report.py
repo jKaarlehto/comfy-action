@@ -133,19 +133,13 @@ def _normalize_cases(job_dir: Path) -> list[dict]:
     return cases
 
 
-def _summarize_case_diagnostics(diag: object) -> dict | None:
-    """Structure a case's NOTCH_CI diagnostics (GET /notch/diagnostics) into an
-    ordered event breadcrumb plus a warning list, so the report can render a
-    per-case diagnostics panel instead of a raw blob.
-
-    Records are {kind:"event"|"log", event/name, data, message, severity}. Events
-    are CI decision breadcrumbs; logs are WARNING+ context. Both are evidence, not
-    a verdict (spec §9b).
+def _summarize_records(records: list, ci_enabled: bool = True) -> dict | None:
+    """Structure a list of NOTCH_CI records into an ordered event breadcrumb plus a
+    warning list. Records are {kind:"event"|"log", event/name, message, severity}.
+    Events are CI decision breadcrumbs; logs are WARNING+ context. Evidence, not a
+    verdict (spec §9b).
     """
-    if not isinstance(diag, dict):
-        return None
-    records = diag.get("records")
-    if not isinstance(records, list):
+    if not isinstance(records, list) or not records:
         return None
     events: list[str] = []
     warnings: list[dict] = []
@@ -164,43 +158,47 @@ def _summarize_case_diagnostics(diag: object) -> dict | None:
                     "message": str(record.get("message") or record.get("event") or record.get("name") or ""),
                 }
             )
-    return {
-        "ci_enabled": bool(diag.get("ci_enabled")),
-        "count": int(diag.get("count", len(records)) or 0),
-        "events": events,
-        "warnings": warnings,
-    }
+    return {"ci_enabled": ci_enabled, "count": len(records), "events": events, "warnings": warnings}
 
 
-def _normalize_diagnostics(job_dir: Path) -> list[dict]:
-    diagnostics: list[dict] = []
-    # NOTCH_CI writes notch-ci.jsonl beside ComfyUI: at the job root in the local
-    # (single-container) topology, but under server/ in the remote topology where
-    # ComfyUI runs in the server container. Read whichever exists.
+def _summarize_case_diagnostics(diag: object) -> dict | None:
+    """Structure a case's GET /notch/diagnostics response (has a top-level
+    'records' list) for the per-case panel.
+    """
+    if not isinstance(diag, dict):
+        return None
+    summary = _summarize_records(diag.get("records") or [], ci_enabled=bool(diag.get("ci_enabled")))
+    if summary is not None and "count" in diag:
+        summary["count"] = int(diag.get("count") or summary["count"])
+    return summary
+
+
+def _diagnostics_by_prompt(job_dir: Path) -> dict:
+    """Read the run-level NOTCH_CI stream (notch-ci.jsonl) and group its records by
+    prompt_id, so each prompt's breadcrumb can be attached to its case.
+
+    The stream lives at the job root (local single-container) or under server/
+    (remote, where ComfyUI runs in the server container). Records with no prompt_id
+    (startup/unattributed) are grouped under "".
+    """
     ci_log = job_dir / "notch-ci.jsonl"
     if not ci_log.is_file():
         ci_log = job_dir / "server" / "notch-ci.jsonl"
+    grouped: dict = {}
     if not ci_log.is_file():
-        return diagnostics
+        return grouped
     for line in _read_text(ci_log).splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            rec = json.loads(line)
+            record = json.loads(line)
         except Exception:
             continue
-        if isinstance(rec, dict) and (rec.get("severity") or rec.get("kind")):
-            diagnostics.append(
-                {
-                    "severity": str(rec.get("severity", "")),
-                    "kind": str(rec.get("kind", "")),
-                    "name": str(rec.get("name") or rec.get("event") or ""),
-                    "message": str(rec.get("message", "")),
-                    "prompt_id": str(rec.get("prompt_id", "")),
-                }
-            )
-    return diagnostics
+        if not isinstance(record, dict) or not (record.get("severity") or record.get("kind")):
+            continue
+        grouped.setdefault(str(record.get("prompt_id", "")), []).append(record)
+    return grouped
 
 
 def normalize_job(name: str, label: str, job_dir: Path) -> dict:
@@ -256,6 +254,36 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         or ""
     )
 
+    # Attribute the run-level NOTCH_CI stream to each case by prompt_id: each
+    # prompt's breadcrumb belongs to its case, not in one giant job-level blob.
+    # The per-case GET /notch/diagnostics (case["diagnostics"]) is preferred when
+    # present; otherwise build it from the prompt's slice of the stream.
+    ci_by_prompt = _diagnostics_by_prompt(job_dir)
+    attributed_prompts: set = set()
+    for case in cases:
+        actual = case.get("actual") if isinstance(case.get("actual"), dict) else {}
+        prompt_id = str(actual.get("prompt_id", "")) if isinstance(actual, dict) else ""
+        if prompt_id:
+            attributed_prompts.add(prompt_id)
+        if not case.get("diagnostics") and prompt_id and prompt_id in ci_by_prompt:
+            case["diagnostics"] = _summarize_records(ci_by_prompt[prompt_id])
+    # The job-level panel keeps only records that belong to no case (startup /
+    # unattributed), so it is small context rather than the whole 447-record dump.
+    unattributed: list[dict] = []
+    for prompt_id, records in ci_by_prompt.items():
+        if prompt_id in attributed_prompts:
+            continue
+        for record in records:
+            unattributed.append(
+                {
+                    "severity": str(record.get("severity", "")),
+                    "kind": str(record.get("kind", "")),
+                    "name": str(record.get("name") or record.get("event") or ""),
+                    "message": str(record.get("message", "")),
+                    "prompt_id": prompt_id,
+                }
+            )
+
     return {
         "name": name,
         "label": label,
@@ -265,7 +293,7 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         "environment": environment,
         "cuda": _read_json(job_dir / "cuda-diagnostics.json"),
         "server_cuda": _read_json(job_dir / "server" / "cuda-diagnostics.json"),
-        "diagnostics": _normalize_diagnostics(job_dir),
+        "diagnostics": unattributed,
         "logs": logs,
         "boot": boot if isinstance(boot, dict) else None,
     }
