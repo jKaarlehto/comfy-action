@@ -1832,18 +1832,22 @@ void RunNegotiationCases(
     const MatrixOptions& options,
     const notch_comfy::ServerCompatibilityFacts& serverCompat)
 {
-    // 3. Server wire-protocol compatibility.
+    // 3. Server/plugin protocol compatibility.
     notch_comfy::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
     {
         std::ostringstream actual;
         actual << "{\"ok\":" << CaseLogger::Bool(compat.m_ok)
                << ",\"client_too_old\":" << CaseLogger::Bool(compat.m_clientTooOld)
-               << ",\"server_too_old\":" << CaseLogger::Bool(compat.m_serverTooOld) << "}";
+               << ",\"server_too_old\":" << CaseLogger::Bool(compat.m_serverTooOld)
+               << ",\"error\":" << CaseLogger::Quote(compat.m_error)
+               << ",\"server_protocol_version\":" << CaseLogger::Quote(serverCompat.m_protocolVersion)
+               << ",\"server_supports_protocol\":" << CaseLogger::Quote(serverCompat.m_supportedProtocolRange)
+               << "}";
         CaseRecord rec;
-        rec.caseId = "server-wire-compatibility";
-        rec.title = "Server wire-protocol version is compatible with the client";
+        rec.caseId = "server-protocol-compatibility";
+        rec.title = "Plugin/server protocol range is compatible with the C++ client";
         rec.phase = "liveness";
-        rec.description = "CheckServerCompatibility over live /features facts: neither the client nor the server is too old.";
+        rec.description = "CheckServerCompatibility over live /features facts: the C++ client and plugin/server protocol ranges intersect.";
         rec.specRef = kSpecLiveness;
         rec.expectedJson = "{\"ok\":true}";
         rec.actualJson = actual.str();
@@ -2203,15 +2207,18 @@ MatrixSummary RunConformance(
     MatrixSummary summary;
     CaseRecorder recorder(logger, summary);
 
-    // 1. Record the linked-against client interface facts. A version that
+    // 1. Record the linked-against C++ client facts. A protocol range that
     //    disagrees with the checked-out extension is then diagnosable offline.
     notch_comfy::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
     {
         std::ostringstream json;
-        json << "{\"record\":\"client_compatibility_facts\""
-             << ",\"interface_version\":" << CaseLogger::Quote(clientFacts.m_clientInterfaceVersion)
-             << ",\"wire_protocol_version\":" << clientFacts.m_wireProtocolVersion
-             << ",\"minimum_server_wire_protocol_version\":" << clientFacts.m_minimumServerWireProtocolVersion
+        json << "{\"record\":\"cpp_client_compatibility_facts\""
+             << ",\"cpp_client_version\":" << CaseLogger::Quote(clientFacts.m_cppClientVersion)
+             << ",\"cpp_api_version\":" << CaseLogger::Quote(clientFacts.m_cppApiVersion)
+             << ",\"protocol_version\":" << CaseLogger::Quote(clientFacts.m_protocolVersion)
+             << ",\"supports_protocol\":" << CaseLogger::Quote(clientFacts.m_supportedProtocolRange)
+             << ",\"capabilities\":" << CaseLogger::Array(clientFacts.m_capabilities)
+             << ",\"handled_notch_websocket_events\":" << CaseLogger::Array(clientFacts.m_handledNotchWebSocketEvents)
              << ",\"source_git_commit\":" << CaseLogger::Quote(clientFacts.m_sourceGitCommit)
              << ",\"source_git_tag\":" << CaseLogger::Quote(clientFacts.m_sourceGitTag) << "}";
         logger.Event(json.str());
@@ -2241,9 +2248,13 @@ MatrixSummary RunConformance(
     }
     {
         std::ostringstream json;
-        json << "{\"record\":\"server_facts\""
-             << ",\"wire_protocol_version\":" << serverCompat.m_wireProtocolVersion
-             << ",\"minimum_client_wire_protocol_version\":" << serverCompat.m_minimumClientWireProtocolVersion
+        json << "{\"record\":\"plugin_server_facts\""
+             << ",\"plugin_version\":" << CaseLogger::Quote(serverCompat.m_pluginVersion)
+             << ",\"protocol_version\":" << CaseLogger::Quote(serverCompat.m_protocolVersion)
+             << ",\"supports_protocol\":" << CaseLogger::Quote(serverCompat.m_supportedProtocolRange)
+             << ",\"minimum_client_protocol\":" << CaseLogger::Quote(serverCompat.m_minimumClientProtocol)
+             << ",\"plugin_capabilities\":" << CaseLogger::Array(serverCompat.m_pluginCapabilities)
+             << ",\"tested_comfyui_refs\":" << CaseLogger::Array(serverCompat.m_testedComfyUiRefs)
              << ",\"output_transports\":" << CaseLogger::Array(deployment.m_outputTransports)
              << ",\"cuda_device_index\":" << deployment.m_cudaDeviceIndex << "}";
         logger.Event(json.str());

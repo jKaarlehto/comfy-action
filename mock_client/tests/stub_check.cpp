@@ -28,8 +28,12 @@ public:
             response.m_statusCode = 200;
             response.m_body =
                 "{\"extension\":{\"notch\":{"
-                "\"protocol_version\":1,"
-                "\"minimum_client_protocol_version\":1,"
+                "\"plugin_version\":\"0.3.0\","
+                "\"protocol_version\":\"0.3.0\","
+                "\"supports_protocol\":\">=0.3.0,<0.4.0\","
+                "\"minimum_client_protocol\":\"0.3.0\","
+                "\"plugin_capabilities\":[\"http-output\",\"disk-output\",\"named-routes\"],"
+                "\"tested_comfyui_refs\":[\"v0.23.0\"],"
                 "\"cuda_device_index\":-1,"
                 "\"output_transports\":[\"disk\",\"http\",\"noop\"]}}}";
             return true;
@@ -125,7 +129,7 @@ int main()
     std::printf("stub conformance: pass=%d fail=%d skip=%d error=%d\n",
                 summary.passed, summary.failed, summary.skipped, summary.errored);
 
-    // negotiation: 1 wire-compat + 2 type-axis + 2 readiness + 10 hard + 4 soft + 1 ws = 20.
+    // negotiation: 1 protocol-compat + 2 type-axis + 2 readiness + 10 hard + 4 soft + 1 ws = 20.
     if (!summary.Ok() || summary.passed != 20 || summary.failed != 0)
     {
         std::printf("stub conformance self-test FAILED\n");

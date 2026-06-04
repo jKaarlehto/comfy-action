@@ -16,15 +16,23 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 14px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-  header { padding: 18px 22px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+  header { padding: 16px 22px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
            background: var(--bg); z-index: 5; }
-  h1 { font-size: 18px; margin: 0 0 6px; }
+  .header-top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+  h1 { font-size: 20px; margin: 0; line-height: 1.2; }
   .sub { color: var(--muted); font-size: 12px; }
   .banner { display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 600; margin-right: 10px; }
   .banner.pass { background: rgba(63,185,80,.15); color: var(--pass); }
   .banner.fail { background: rgba(248,81,73,.15); color: var(--fail); }
   .totals span { margin-right: 12px; color: var(--muted); }
   .totals b { color: var(--fg); }
+  .run-context { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; margin-top: 10px; }
+  .context-card { border: 1px solid var(--line); background: rgba(30,34,43,.72); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .context-card .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .context-card .value { color: var(--fg); font-size: 13px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+  .context-card .detail { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+  .job-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .job-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--muted); font-size: 12px; }
   main { padding: 16px 22px 64px; max-width: 1100px; }
   input#search { width: 100%; padding: 9px 12px; margin: 6px 0 18px; border: 1px solid var(--line);
                  background: var(--panel); color: var(--fg); border-radius: 8px; font-size: 14px; }
@@ -66,11 +74,13 @@
 </head>
 <body>
 <header>
-  <h1>Notch-Comfy conformance report</h1>
-  <div id="head-status"></div>
+  <div class="header-top">
+    <h1>Notch-Comfy conformance results</h1>
+    <div id="head-status"></div>
+  </div>
   <div class="sub" id="head-meta">run ${run_title} · generated ${generated_at}</div>
-  <div class="sub" id="head-context"></div>
-  <div class="sub" id="head-jobs"></div>
+  <div class="run-context" id="head-context"></div>
+  <div class="job-chips" id="head-jobs"></div>
 </header>
 <main>
   <input id="search" placeholder="Filter cases, error codes, diagnostics, log lines…" autocomplete="off">
@@ -86,6 +96,7 @@ const data = JSON.parse(document.getElementById("diagnostics-data").textContent)
 const el = (tag, cls, txt) => { const n = document.createElement(tag); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
 const pretty = (v) => { try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); } };
 const order = { fail: 0, error: 1, skip: 2, pass: 3, "": 4 };
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 
 function headStatus(run) {
   const s = run.summary || {};
@@ -98,30 +109,43 @@ function headStatus(run) {
                 `<span>fail <b>${s.fail||0}</b></span><span>skip <b>${s.skip||0}</b></span><span>error <b>${s.error||0}</b></span>`;
   host.appendChild(t);
 
-  // Tested-against context: the extension (repo / branch-or-tag / commit) and the
-  // ComfyUI version it was verified against.
   const r = run.run || {};
   const short = (sha) => (sha && sha.length > 10 ? sha.slice(0, 10) : (sha || ""));
-  const parts = [];
-  if (r.repository) parts.push(`repo <b>${r.repository}</b>`);
-  if (r.ref) parts.push(`branch/tag <b>${r.ref}</b>`);
-  if (r.commit || r.extension_commit) parts.push(`commit <b>${short(r.commit || r.extension_commit)}</b>`);
-  if (r.comfyui_ref || r.comfyui_commit) {
+  document.getElementById("head-meta").textContent = `run ${r.id || ""} · generated ${run.generated_at || ""}`;
+  const card = (label, value, detail) =>
+    `<div class="context-card"><div class="label">${esc(label)}</div><div class="value">${esc(value || "—")}</div>` +
+    `${detail ? `<div class="detail">${esc(detail)}</div>` : ""}</div>`;
+  const testedRefs = Array.isArray(r.tested_comfyui_refs) ? r.tested_comfyui_refs.join(", ") : (r.tested_comfyui_refs || "");
+  const cards = [];
+  if (r.plugin_version || r.protocol_version || r.plugin_supports_protocol) {
+    cards.push(card("Plugin/server", [r.plugin_version && `plugin ${r.plugin_version}`, r.protocol_version && `protocol ${r.protocol_version}`].filter(Boolean).join(" · "), r.plugin_supports_protocol && `supports ${r.plugin_supports_protocol}`));
+  }
+  if (r.cpp_client_version || r.cpp_api_version || r.cpp_client_supports_protocol) {
+    cards.push(card("C++ client", [r.cpp_client_version && `client ${r.cpp_client_version}`, r.cpp_api_version && `API ${r.cpp_api_version}`].filter(Boolean).join(" · "), r.cpp_client_supports_protocol && `supports ${r.cpp_client_supports_protocol}`));
+  }
+  if (r.comfyui_ref || r.comfyui_commit || testedRefs) {
     const cv = [r.comfyui_ref, short(r.comfyui_commit)].filter(Boolean).join(" @ ");
-    parts.push(`ComfyUI <b>${cv}</b>`);
+    cards.push(card("ComfyUI under test", cv || r.default_comfyui_ref, testedRefs && `tested refs: ${testedRefs}`));
+  }
+  if (r.repository || r.ref || r.commit || r.extension_commit) {
+    cards.push(card("Source", r.repository || "repository", [r.ref && `ref ${r.ref}`, (r.commit || r.extension_commit) && `commit ${short(r.commit || r.extension_commit)}`].filter(Boolean).join(" · ")));
   }
   const ctx = document.getElementById("head-context");
-  if (ctx) ctx.innerHTML = parts.join(" · ");
+  if (ctx) ctx.innerHTML = cards.join("");
 
   const jobNames = (run.jobs || [])
     .map((job) => job.label || job.name || "")
     .filter(Boolean);
   const jobs = document.getElementById("head-jobs");
-  if (jobs) jobs.textContent = jobNames.length ? "jobs: " + jobNames.join(" · ") : "";
+  if (jobs) jobs.innerHTML = jobNames.map((name) => `<span class="job-chip">${esc(name)}</span>`).join("");
 }
 
 function envTable(env) {
   const rows = [["platform", env.platform], ["gpu", env.gpu], ["torch", env.torch], ["cuda", env.cuda],
+    ["plugin", env.plugin_version],
+    ["protocol", [env.protocol_version, env.plugin_supports_protocol && `plugin ${env.plugin_supports_protocol}`, env.cpp_client_supports_protocol && `C++ ${env.cpp_client_supports_protocol}`].filter(Boolean).join(" | ")],
+    ["C++ client", env.cpp_client_version], ["C++ API", env.cpp_api_version],
+    ["tested ComfyUI refs", Array.isArray(env.tested_comfyui_refs) ? env.tested_comfyui_refs.join(", ") : env.tested_comfyui_refs],
     ["comfyui", (env.comfyui_ref||"") + " " + (env.comfyui_commit||"").slice(0,10)],
     ["extension", (env.extension_commit||"").slice(0,10)]];
   const tbl = el("table", "kv");

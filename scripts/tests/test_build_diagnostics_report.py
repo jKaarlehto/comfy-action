@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -12,8 +13,10 @@ from build_diagnostics_report import (  # noqa: E402
     json_for_script,
     normalize_job,
     render_report,
+    render_run_markdown,
     truncate_log,
 )
+from write_context_artifact import write_docker_preflight_artifact, write_metadata_artifact  # noqa: E402
 
 _HERE = os.path.dirname(__file__)
 TEMPLATE = os.path.join(_HERE, "..", "report_template.html")
@@ -105,6 +108,112 @@ def test_aggregate_run_rolls_up_and_orders():
     assert run["jobs"][0]["name"] == "delivery_local"
 
 
+def test_metadata_job_promotes_version_context_to_run_header():
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    try:
+        job = os.path.join(root, "notch-contract-metadata-1")
+        os.makedirs(job)
+        with open(os.path.join(job, "compatibility-result.json"), "w", encoding="utf-8") as handle:
+            json.dump({"profile": "metadata", "result": "pass", "conformance": {"pass": 1}}, handle)
+        with open(os.path.join(job, "environment.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "plugin_version": "0.3.0",
+                    "protocol_version": "0.3.0",
+                    "plugin_supports_protocol": ">=0.3.0,<0.4.0",
+                    "cpp_client_version": "0.3.0",
+                    "cpp_api_version": "0.3.0",
+                    "cpp_client_supports_protocol": ">=0.3.0,<0.4.0",
+                    "comfyui_ref": "v0.23.0",
+                    "tested_comfyui_refs": ["v0.23.0"],
+                    "extension_commit": "ext-sha",
+                },
+                handle,
+            )
+
+        jobs = discover_jobs(root)
+        assert "metadata" in jobs
+        run = aggregate_run(jobs, {"id": "T"})
+        assert run["run"]["plugin_version"] == "0.3.0"
+        assert run["run"]["cpp_client_version"] == "0.3.0"
+        assert run["run"]["cpp_api_version"] == "0.3.0"
+        assert run["run"]["protocol_version"] == "0.3.0"
+        assert run["run"]["comfyui_ref"] == "v0.23.0"
+    finally:
+        shutil.rmtree(root)
+
+
+def test_context_writer_builds_metadata_artifact():
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    try:
+        metadata_path = Path(root) / "context.json"
+        artifact = Path(root) / "artifact"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "environment": {
+                        "plugin_version": "0.3.0",
+                        "cpp_client_version": "0.3.0",
+                        "cpp_api_version": "0.3.0",
+                        "protocol_version": "0.3.0",
+                        "comfyui_ref": "v0.23.0",
+                    },
+                    "actual": {"plugin_server": {"plugin_version": "0.3.0"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        write_metadata_artifact(artifact, metadata_path, result="fail", errors=["generated_versions_stale"])
+
+        with open(artifact / "compatibility-result.json", encoding="utf-8") as handle:
+            compatibility = json.load(handle)
+        with open(artifact / "environment.json", encoding="utf-8") as handle:
+            environment = json.load(handle)
+        with open(artifact / "conformance" / "cases" / "version-metadata" / "case.json", encoding="utf-8") as handle:
+            case = json.load(handle)
+
+        assert compatibility["profile"] == "metadata"
+        assert compatibility["result"] == "fail"
+        assert environment["plugin_version"] == "0.3.0"
+        assert case["actual"]["metadata_checks"]["errors"] == ["generated_versions_stale"]
+    finally:
+        shutil.rmtree(root)
+
+
+def test_context_writer_builds_docker_preflight_artifact():
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    try:
+        metadata_path = Path(root) / "context.json"
+        log_path = Path(root) / "docker.log"
+        artifact = Path(root) / "artifact"
+        metadata_path.write_text(json.dumps({"environment": {"plugin_version": "0.3.0"}}), encoding="utf-8")
+        log_path.write_text("docker daemon unavailable\n", encoding="utf-8")
+
+        write_docker_preflight_artifact(artifact, metadata_path, log_path=log_path)
+
+        with open(artifact / "compatibility-result.json", encoding="utf-8") as handle:
+            compatibility = json.load(handle)
+        with open(artifact / "conformance" / "cases" / "docker-preflight" / "case.json", encoding="utf-8") as handle:
+            case = json.load(handle)
+
+        assert compatibility["profile"] == "extension_boot"
+        assert compatibility["result"] == "fail"
+        assert case["errors"] == ["docker_unavailable"]
+        assert "docker daemon unavailable" in case["actual"]["log"]
+    finally:
+        shutil.rmtree(root)
+
+
 def test_remote_job_reads_server_environment_for_comfyui_context():
     # Remote delivery's artifact root is the mock-client container. ComfyUI runs
     # in the server container, so the ComfyUI ref/commit and Python facts live
@@ -160,7 +269,22 @@ def test_remote_job_reads_server_environment_for_comfyui_context():
 
 
 def test_render_single_self_contained_file():
-    run = {"generated_at": "t", "run": {"id": "1"}, "summary": {"result": "pass", "jobs": 0}, "jobs": []}
+    run = {
+        "generated_at": "t",
+        "run": {
+            "id": "1",
+            "plugin_version": "0.3.0",
+            "cpp_client_version": "0.3.0",
+            "cpp_api_version": "0.3.0",
+            "protocol_version": "0.3.0",
+            "plugin_supports_protocol": ">=0.3.0,<0.4.0",
+            "cpp_client_supports_protocol": ">=0.3.0,<0.4.0",
+            "comfyui_ref": "v0.23.0",
+            "tested_comfyui_refs": ["v0.23.0"],
+        },
+        "summary": {"result": "pass", "jobs": 0},
+        "jobs": [],
+    }
     html = render_report(run, TEMPLATE)
     assert 'src="http' not in html and 'href="http' not in html
     assert "fetch(" not in html
@@ -171,7 +295,18 @@ def test_render_single_self_contained_file():
     assert json.loads(match.group(1).replace("\\u003c", "<")) == run
     assert 'id="head-context"' in html
     assert 'id="head-jobs"' in html
-    assert '"jobs: " + jobNames.join(" · ")' in html
+    assert 'Notch-Comfy conformance results' in html
+    assert 'Plugin/server' in html
+    assert 'ComfyUI under test' in html
+    assert 'job-chip' in html
+
+
+def test_markdown_summary_points_to_results_artifact():
+    run = {"summary": {"result": "pass", "jobs": 0, "pass": 0, "fail": 0, "skip": 0, "error": 0}, "jobs": []}
+    markdown = render_run_markdown(run)
+    assert "`results.html`" in markdown
+    assert "**results** artifact" in markdown
+    assert "diagnostics-report" not in markdown
 
 
 def test_render_escapes_data_breakout():
@@ -240,7 +375,7 @@ def test_per_case_diagnostics_structured():
 def test_full_build_from_fixture_root(tmp_path=None):
     import tempfile
 
-    out = os.path.join(tempfile.mkdtemp(), "diagnostics-report.html")
+    out = os.path.join(tempfile.mkdtemp(), "results.html")
     jobs = discover_jobs(os.path.abspath(FIXTURE_ROOT))
     run = aggregate_run(jobs, {"id": "T"})
     html = render_report(run, TEMPLATE)
