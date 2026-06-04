@@ -315,9 +315,23 @@ def aggregate_run(jobs: dict, run_meta: dict | None = None) -> dict:
     )
     summary["result"] = "fail" if bad else "pass"
 
+    # Surface the tested-against facts into the run header. The repository/ref/
+    # commit identify the extension under test (from CLI/env); the ComfyUI ref +
+    # commit and the extension commit come from any job's environment.json (the
+    # action records them per job, identical across jobs in a run).
+    run = dict(run_meta or {})
+    for job in normalized:
+        env = job.get("environment", {}) or {}
+        if not run.get("comfyui_ref") and env.get("comfyui_ref"):
+            run["comfyui_ref"] = env.get("comfyui_ref")
+        if not run.get("comfyui_commit") and env.get("comfyui_commit"):
+            run["comfyui_commit"] = env.get("comfyui_commit")
+        if not run.get("extension_commit") and env.get("extension_commit"):
+            run["extension_commit"] = env.get("extension_commit")
+
     return {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "run": run_meta or {},
+        "run": run,
         "summary": summary,
         "jobs": normalized,
     }
@@ -468,11 +482,15 @@ def main(argv=None) -> int:
     parser.add_argument("--template", default=str(Path(__file__).with_name("report_template.html")))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
-    parser.add_argument("--ref", default=os.environ.get("GITHUB_REF_NAME", ""))
+    parser.add_argument("--ref", default=os.environ.get("GITHUB_REF_NAME", ""), help="branch or tag under test")
+    parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="extension commit SHA under test")
     args = parser.parse_args(argv)
 
     jobs = discover_jobs(Path(args.artifacts_root))
-    run = aggregate_run(jobs, {"id": args.run_id, "repository": args.repository, "ref": args.ref})
+    run = aggregate_run(
+        jobs,
+        {"id": args.run_id, "repository": args.repository, "ref": args.ref, "commit": args.commit},
+    )
     html = render_report(run, Path(args.template))
     Path(args.output).write_text(html, encoding="utf-8")
     if args.summary_output:

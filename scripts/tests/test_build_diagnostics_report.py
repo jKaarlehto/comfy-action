@@ -94,10 +94,14 @@ def test_discover_jobs_flattened_layout(tmp_path=None):
 def test_aggregate_run_rolls_up_and_orders():
     jobs = discover_jobs(os.path.abspath(FIXTURE_ROOT))
     assert "delivery_local" in jobs
-    run = aggregate_run(jobs, {"id": "123", "repository": "r", "ref": "v0.3.0"})
+    run = aggregate_run(jobs, {"id": "123", "repository": "r", "ref": "v0.3.0", "commit": "sha789"})
     assert run["summary"]["jobs"] == 1
     assert run["summary"]["result"] == "fail"  # one job has a fail
     assert run["generated_at"]
+    assert run["run"]["commit"] == "sha789"
+    assert run["run"]["comfyui_ref"] == "v0.23.0"
+    assert run["run"]["comfyui_commit"] == "abc123"
+    assert run["run"]["extension_commit"] == "def456"
     assert run["jobs"][0]["name"] == "delivery_local"
 
 
@@ -111,6 +115,9 @@ def test_render_single_self_contained_file():
     assert match
     assert "</script>" not in match.group(1)  # the inlined data has no raw close tag
     assert json.loads(match.group(1).replace("\\u003c", "<")) == run
+    assert 'id="head-context"' in html
+    assert 'id="head-jobs"' in html
+    assert '"jobs: " + jobNames.join(" · ")' in html
 
 
 def test_render_escapes_data_breakout():

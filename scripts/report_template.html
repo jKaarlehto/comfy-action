@@ -68,7 +68,9 @@
 <header>
   <h1>Notch-Comfy conformance report</h1>
   <div id="head-status"></div>
-  <div class="sub">run ${run_title} · generated ${generated_at}</div>
+  <div class="sub" id="head-meta">run ${run_title} · generated ${generated_at}</div>
+  <div class="sub" id="head-context"></div>
+  <div class="sub" id="head-jobs"></div>
 </header>
 <main>
   <input id="search" placeholder="Filter cases, error codes, diagnostics, log lines…" autocomplete="off">
@@ -95,6 +97,27 @@ function headStatus(run) {
   t.innerHTML = `<span>jobs <b>${s.jobs||0}</b></span><span>pass <b>${s.pass||0}</b></span>` +
                 `<span>fail <b>${s.fail||0}</b></span><span>skip <b>${s.skip||0}</b></span><span>error <b>${s.error||0}</b></span>`;
   host.appendChild(t);
+
+  // Tested-against context: the extension (repo / branch-or-tag / commit) and the
+  // ComfyUI version it was verified against.
+  const r = run.run || {};
+  const short = (sha) => (sha && sha.length > 10 ? sha.slice(0, 10) : (sha || ""));
+  const parts = [];
+  if (r.repository) parts.push(`repo <b>${r.repository}</b>`);
+  if (r.ref) parts.push(`branch/tag <b>${r.ref}</b>`);
+  if (r.commit || r.extension_commit) parts.push(`commit <b>${short(r.commit || r.extension_commit)}</b>`);
+  if (r.comfyui_ref || r.comfyui_commit) {
+    const cv = [r.comfyui_ref, short(r.comfyui_commit)].filter(Boolean).join(" @ ");
+    parts.push(`ComfyUI <b>${cv}</b>`);
+  }
+  const ctx = document.getElementById("head-context");
+  if (ctx) ctx.innerHTML = parts.join(" · ");
+
+  const jobNames = (run.jobs || [])
+    .map((job) => job.label || job.name || "")
+    .filter(Boolean);
+  const jobs = document.getElementById("head-jobs");
+  if (jobs) jobs.textContent = jobNames.length ? "jobs: " + jobNames.join(" · ") : "";
 }
 
 function envTable(env) {
