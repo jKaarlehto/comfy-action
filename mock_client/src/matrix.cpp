@@ -1407,7 +1407,16 @@ void RunFilePathDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true,\"named_route_handoff_ok\":true,\"verify_ok\":true}";
+    // Only assert named_route_handoff_ok when it actually applies (disk delivery in
+    // the route-disk topology); listing it for http/plain-disk cases is misleading.
+    std::ostringstream expected;
+    expected << "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true";
+    if (routeHandoffApplies)
+    {
+        expected << ",\"named_route_handoff_ok\":true";
+    }
+    expected << ",\"verify_ok\":true}";
+    rec.expectedJson = expected.str();
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
