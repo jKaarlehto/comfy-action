@@ -254,12 +254,15 @@ must fail loudly, not cryptically:
   `conformance-result.json`, instead of letting a raw CMake error abort the
   job with no contract framing.
 - **Startup version facts.** On every run the mock client logs
-  `ClientProtocol::GetClientCompatibilityFacts()` — client interface version,
-  source git commit/tag, wire-protocol version, and minimum server wire-protocol
-  version — as the first record in `mock-client.jsonl` and into
-  `environment.json`. A linked-against interface that disagrees with the
-  checked-out `extension_ref` is then diagnosable from artifacts alone, without
-  replaying the run.
+  `ClientProtocol::GetClientCompatibilityFacts()` — C++ client source version,
+  C++ API version, protocol version, supported protocol range, capabilities,
+  source git commit/tag, and handled Notch WebSocket events — as the first
+  record in `mock-client.jsonl` and into `environment.json`. The live plugin
+  `/features` facts are logged separately as plugin/server facts: plugin
+  version, protocol version, supported protocol range, plugin capabilities, and
+  tested ComfyUI refs. A linked-against C++ client whose protocol range does
+  not intersect the checked-out plugin/server range is then diagnosable from
+  artifacts alone, without replaying the run.
 
 Treat `transport_interface_incompatible` as a shared-setup failure, not a
 per-case `fail`: like a server that cannot start or a client that cannot
