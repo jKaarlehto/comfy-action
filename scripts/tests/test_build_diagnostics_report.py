@@ -75,6 +75,22 @@ def test_normalize_job_reads_cases_and_env():
     assert job["environment"]["torch"] == "2.12.0+cu130"
 
 
+def test_discover_jobs_flattened_layout(tmp_path=None):
+    # download-artifact extracts a single artifact's contents directly into the
+    # download path (no per-artifact subdir). discover_jobs must treat that root
+    # as the job dir, not only child subdirs.
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    shutil.copytree(FIXTURE_JOB, root, dirs_exist_ok=True)
+    # name the marker so the mode is identifiable by content, not folder name
+    with open(os.path.join(root, "compatibility-result.json"), "w", encoding="utf-8") as handle:
+        handle.write('{"profile":"delivery_local_client","result":"fail"}')
+    jobs = discover_jobs(root)
+    assert "delivery_local" in jobs, "flattened single-artifact root must be discovered as a job"
+
+
 def test_aggregate_run_rolls_up_and_orders():
     jobs = discover_jobs(os.path.abspath(FIXTURE_ROOT))
     assert "delivery_local" in jobs

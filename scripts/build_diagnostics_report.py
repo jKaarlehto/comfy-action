@@ -393,25 +393,36 @@ def discover_jobs(artifacts_root: Path) -> dict:
     if not artifacts_root.is_dir():
         return jobs
 
-    candidates: list[Path] = []
-    seen: set = set()
-    stack = [(artifacts_root, 0)]
-    while stack:
-        current, depth = stack.pop()
-        if current in seen or depth > 4:
-            continue
-        seen.add(current)
-        if current.name == "server":  # the remote server's artifacts belong to its parent job
-            continue
-        has_marker = any((current / marker).is_file() for marker in _JOB_MARKERS) or (
-            current / "conformance" / "cases"
+    def is_job_dir(path: Path) -> bool:
+        if path.name == "server":  # the remote server's artifacts belong to its parent job
+            return False
+        return any((path / marker).is_file() for marker in _JOB_MARKERS) or (
+            path / "conformance" / "cases"
         ).is_dir()
-        if has_marker and current != artifacts_root:
-            candidates.append(current)
-            continue  # do not descend into a job dir
-        for child in sorted(current.iterdir()):
-            if child.is_dir():
-                stack.append((child, depth + 1))
+
+    candidates: list[Path] = []
+    # download-artifact extracts a SINGLE artifact's contents directly into the
+    # download path (flattened), but nests one subdir per artifact when several
+    # match. Handle both: if the root itself is a job dir, use it; otherwise scan
+    # descendants for per-artifact subdirs.
+    if is_job_dir(artifacts_root):
+        candidates.append(artifacts_root)
+    else:
+        seen: set = set()
+        stack = [(artifacts_root, 0)]
+        while stack:
+            current, depth = stack.pop()
+            if current in seen or depth > 4:
+                continue
+            seen.add(current)
+            if current.name == "server":
+                continue
+            if current != artifacts_root and is_job_dir(current):
+                candidates.append(current)
+                continue  # do not descend into a job dir
+            for child in sorted(current.iterdir()):
+                if child.is_dir():
+                    stack.append((child, depth + 1))
 
     for job_dir in sorted(candidates, key=lambda p: p.name):
         mode = _mode_for_job_dir(job_dir)
