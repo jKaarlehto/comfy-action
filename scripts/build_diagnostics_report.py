@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one self-contained diagnostics-report.html from extracted CI artifacts.
+"""Build one self-contained results.html from extracted CI artifacts.
 
 The report aggregates every conformance job's artifact folder into a single
 portable HTML file: all data is inlined (no sibling files, no server, no network
@@ -22,6 +22,7 @@ from string import Template
 
 # Canonical pipeline order + human labels (match the workflow job names).
 JOB_LABELS = {
+    "metadata": "Metadata",
     "unit_tests": "Unit tests",
     "extension_boot": "Extension boot",
     "protocol_negotiation": "Protocol negotiation",
@@ -237,6 +238,15 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         "comfyui_commit": env_value("comfyui_commit"),
         "extension_commit": env_value("extension_commit"),
         "feature_flags": env.get("server_feature_flags") or server_env.get("server_feature_flags", {}),
+        "metadata_schema": env_value("metadata_schema"),
+        "plugin_version": env_value("plugin_version"),
+        "protocol_version": env_value("protocol_version"),
+        "plugin_supports_protocol": env_value("plugin_supports_protocol"),
+        "cpp_client_version": env_value("cpp_client_version"),
+        "cpp_api_version": env_value("cpp_api_version"),
+        "cpp_client_supports_protocol": env_value("cpp_client_supports_protocol"),
+        "default_comfyui_ref": env_value("default_comfyui_ref"),
+        "tested_comfyui_refs": env_value("tested_comfyui_refs"),
     }
 
     # Totals/result come from conformance-result.json, but fall back to
@@ -336,6 +346,19 @@ def aggregate_run(jobs: dict, run_meta: dict | None = None) -> dict:
             run["comfyui_commit"] = env.get("comfyui_commit")
         if not run.get("extension_commit") and env.get("extension_commit"):
             run["extension_commit"] = env.get("extension_commit")
+        for key in (
+            "metadata_schema",
+            "plugin_version",
+            "protocol_version",
+            "plugin_supports_protocol",
+            "cpp_client_version",
+            "cpp_api_version",
+            "cpp_client_supports_protocol",
+            "default_comfyui_ref",
+            "tested_comfyui_refs",
+        ):
+            if not run.get(key) and env.get(key):
+                run[key] = env.get(key)
 
     return {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -349,10 +372,30 @@ def render_report(run: dict, template_path: Path) -> str:
     """Render the static template with the run inlined as escaped JSON."""
     template = Template(Path(template_path).read_text(encoding="utf-8"))
     return template.safe_substitute(
-        run_title=str(run.get("run", {}).get("id", "")),
+        run_title=_run_title(run),
         generated_at=str(run.get("generated_at", "")),
         data_json=json_for_script(run),
     )
+
+
+def _run_title(run: dict) -> str:
+    meta = run.get("run", {}) or {}
+    title_parts = []
+    if meta.get("plugin_version"):
+        title_parts.append(f"plugin {meta.get('plugin_version')}")
+    if meta.get("cpp_client_version"):
+        title_parts.append(f"C++ client {meta.get('cpp_client_version')}")
+    if meta.get("cpp_api_version"):
+        title_parts.append(f"API {meta.get('cpp_api_version')}")
+    if meta.get("protocol_version"):
+        title_parts.append(f"protocol {meta.get('protocol_version')}")
+    if meta.get("comfyui_ref"):
+        title_parts.append(f"ComfyUI {meta.get('comfyui_ref')}")
+    if not title_parts and meta.get("id"):
+        title_parts.append(f"run {meta.get('id')}")
+    elif meta.get("id"):
+        title_parts.append(f"run {meta.get('id')}")
+    return " / ".join(str(part) for part in title_parts if part)
 
 
 def _result_icon(result: str) -> str:
@@ -400,8 +443,8 @@ def render_run_markdown(run: dict) -> str:
             lines.append(f"- ❌ `{case.get('id', '')}` ({label}){suffix}")
         lines.append("")
     lines.append(
-        "The full single-file `diagnostics-report.html` (every job, all cases, logs, "
-        "diagnostics) is attached as the **diagnostics-report** artifact — download and open directly."
+        "The full single-file `results.html` (every job, all cases, logs, "
+        "diagnostics) is attached as the **results** artifact — download and open directly."
     )
     return "\n".join(lines) + "\n"
 
@@ -482,10 +525,10 @@ def discover_jobs(artifacts_root: Path) -> dict:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Build a single-file diagnostics report from CI artifacts")
+    parser = argparse.ArgumentParser(description="Build a single-file conformance results report from CI artifacts")
     parser.add_argument("--artifacts-root", required=True, help="dir containing one subfolder per downloaded job artifact")
-    parser.add_argument("--output", default="diagnostics-report.html")
-    parser.add_argument("--summary-output", default="diagnostics-summary.md",
+    parser.add_argument("--output", default="results.html")
+    parser.add_argument("--summary-output", default="results-summary.md",
                         help="aggregate markdown overview for the run's Step Summary")
     parser.add_argument("--template", default=str(Path(__file__).with_name("report_template.html")))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
@@ -505,7 +548,7 @@ def main(argv=None) -> int:
         Path(args.summary_output).write_text(render_run_markdown(run), encoding="utf-8")
     summary = run["summary"]
     print(
-        f"diagnostics report: {args.output} jobs={summary['jobs']} "
+        f"results report: {args.output} jobs={summary['jobs']} "
         f"pass={summary['pass']} fail={summary['fail']} skip={summary['skip']} "
         f"error={summary['error']} result={summary['result']}"
     )
