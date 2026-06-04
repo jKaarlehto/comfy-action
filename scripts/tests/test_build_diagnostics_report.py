@@ -105,6 +105,60 @@ def test_aggregate_run_rolls_up_and_orders():
     assert run["jobs"][0]["name"] == "delivery_local"
 
 
+def test_remote_job_reads_server_environment_for_comfyui_context():
+    # Remote delivery's artifact root is the mock-client container. ComfyUI runs
+    # in the server container, so the ComfyUI ref/commit and Python facts live
+    # under server/. The report must merge those facts or the remote job table
+    # shows an empty "comfyui" row.
+    import shutil
+    import tempfile
+
+    job = tempfile.mkdtemp()
+    try:
+        os.makedirs(os.path.join(job, "server"))
+        with open(os.path.join(job, "environment.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "platform": "Linux-client",
+                    "extension_commit": "ext-client",
+                    "server_feature_flags": {"output_transports": ["http"]},
+                },
+                handle,
+            )
+        with open(os.path.join(job, "server", "environment.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "platform": "Linux-server",
+                    "comfyui_ref": "v0.23.0",
+                    "comfyui_commit": "comfy-server-sha",
+                    "extension_commit": "ext-server",
+                    "nvidia_smi": "hdr\nx\ny\n| RTX 5090 |",
+                    "server_feature_flags": {"output_transports": ["http", "disk"]},
+                },
+                handle,
+            )
+        with open(os.path.join(job, "server", "python-env.json"), "w", encoding="utf-8") as handle:
+            json.dump({"torch": "2.12.0+cu130", "torch_cuda_version": "13.0"}, handle)
+        with open(os.path.join(job, "compatibility-result.json"), "w", encoding="utf-8") as handle:
+            json.dump({"profile": "delivery_remote_client", "result": "pass", "conformance": {"pass": 1}}, handle)
+
+        normalized = normalize_job("delivery_remote", "Remote delivery", job)
+        env = normalized["environment"]
+        assert env["platform"] == "Linux-client"
+        assert env["comfyui_ref"] == "v0.23.0"
+        assert env["comfyui_commit"] == "comfy-server-sha"
+        assert env["extension_commit"] == "ext-client"
+        assert env["torch"] == "2.12.0+cu130"
+        assert env["cuda"] == "13.0"
+
+        run = aggregate_run({"delivery_remote": ("Remote delivery", job)}, {"id": "T"})
+        assert run["run"]["comfyui_ref"] == "v0.23.0"
+        assert run["run"]["comfyui_commit"] == "comfy-server-sha"
+        assert run["run"]["extension_commit"] == "ext-client"
+    finally:
+        shutil.rmtree(job)
+
+
 def test_render_single_self_contained_file():
     run = {"generated_at": "t", "run": {"id": "1"}, "summary": {"result": "pass", "jobs": 0}, "jobs": []}
     html = render_report(run, TEMPLATE)

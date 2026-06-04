@@ -208,6 +208,8 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
     boot = _read_json(job_dir / "extension-boot-result.json")
     env = _read_json(job_dir / "environment.json") or {}
     py = _read_json(job_dir / "python-env.json") or {}
+    server_env = _read_json(job_dir / "server" / "environment.json") or {}
+    server_py = _read_json(job_dir / "server" / "python-env.json") or {}
 
     logs: dict = {}
     for key, fname in (
@@ -219,16 +221,22 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         if log_file.is_file():
             logs[key] = truncate_log(_read_text(log_file), head=120, tail=120)
 
-    nvidia = (env.get("nvidia_smi", "") or "").splitlines()
+    def env_value(key: str) -> object:
+        return env.get(key) or server_env.get(key) or ""
+
+    def py_value(key: str) -> object:
+        return py.get(key) or server_py.get(key) or ""
+
+    nvidia = (str(env_value("nvidia_smi") or "")).splitlines()
     environment = {
-        "platform": env.get("platform", ""),
+        "platform": env_value("platform"),
         "gpu": nvidia[3].strip() if len(nvidia) > 3 else (nvidia[0] if nvidia else ""),
-        "torch": py.get("torch", ""),
-        "cuda": py.get("torch_cuda_version", ""),
-        "comfyui_ref": env.get("comfyui_ref", ""),
-        "comfyui_commit": env.get("comfyui_commit", ""),
-        "extension_commit": env.get("extension_commit", ""),
-        "feature_flags": env.get("server_feature_flags", {}),
+        "torch": py_value("torch"),
+        "cuda": py_value("torch_cuda_version"),
+        "comfyui_ref": env_value("comfyui_ref"),
+        "comfyui_commit": env_value("comfyui_commit"),
+        "extension_commit": env_value("extension_commit"),
+        "feature_flags": env.get("server_feature_flags") or server_env.get("server_feature_flags", {}),
     }
 
     # Totals/result come from conformance-result.json, but fall back to
