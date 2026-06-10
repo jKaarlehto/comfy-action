@@ -15,11 +15,11 @@
 namespace
 {
 
-class StubHttp : public notch_comfy::IHttpTransport
+class StubHttp : public ComfyExtensionClientProtocol::IHttpTransport
 {
 public:
-    bool Send(const notch_comfy::HttpRequest& request,
-              notch_comfy::HttpResponse& response,
+    bool Send(const ComfyExtensionClientProtocol::HttpRequest& request,
+              ComfyExtensionClientProtocol::HttpResponse& response,
               std::string& error) override
     {
         const std::string& path = request.m_path;

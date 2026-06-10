@@ -84,7 +84,7 @@ bool LocalCudaShareReader::CudaAvailable(std::string& error)
 }
 
 bool LocalCudaShareReader::ReadShare(
-    const notch_comfy::CudaShareStatus& share,
+    const ComfyExtensionClientProtocol::CudaShareStatus& share,
     std::vector<uint8_t>& bytes,
     std::string& error)
 {

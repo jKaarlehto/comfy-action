@@ -6,17 +6,17 @@
 # IXWebSocket transport adapters build only in the Docker runner and are NOT
 # covered here.
 #
-# Usage: local_build_check.sh [path-to/cpp/notch_comfy_client]
+# Usage: local_build_check.sh [path-to/cpp/comfy_extension_client]
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mock_root="$(cd "$here/.." && pwd)"
 action_root="$(cd "$mock_root/.." && pwd)"
 
-iface="${1:-$action_root/../ComfyUI/custom_nodes/ComfyUI-Notch/cpp/notch_comfy_client}"
+iface="${1:-$action_root/../ComfyUI/custom_nodes/ComfyUI-Notch/cpp/comfy_extension_client}"
 if [ ! -f "$iface/CMakeLists.txt" ]; then
   echo "interface source not found at: $iface" >&2
-  echo "pass the path to cpp/notch_comfy_client as the first argument" >&2
+  echo "pass the path to cpp/comfy_extension_client as the first argument" >&2
   exit 2
 fi
 

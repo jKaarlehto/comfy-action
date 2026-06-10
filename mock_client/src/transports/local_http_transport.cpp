@@ -15,8 +15,8 @@ LocalHttpTransport::LocalHttpTransport(const std::string& baseUrl, const std::st
 {
 }
 
-bool LocalHttpTransport::Send(const notch_comfy::HttpRequest& request,
-                              notch_comfy::HttpResponse& response,
+bool LocalHttpTransport::Send(const ComfyExtensionClientProtocol::HttpRequest& request,
+                              ComfyExtensionClientProtocol::HttpResponse& response,
                               std::string& error)
 {
     ix::HttpClient client(/*async=*/false);

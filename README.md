@@ -16,7 +16,7 @@ Notch node classes and server feature facts.
 - copy or clone `ComfyUI-Notch` into `ComfyUI/custom_nodes/ComfyUI-Notch`;
 - use the container-owned Python environment managed by uv;
 - install PyTorch, ComfyUI dependencies, and `ComfyUI-Notch` dependencies with uv;
-- build and run `cpp/notch_comfy_client`'s compile-check target;
+- build and run `cpp/comfy_extension_client`'s compile-check target;
 - start ComfyUI on `<listen_address>:<port>` and poll the same address;
 - assert `/features` includes Notch compatibility facts;
 - assert `/object_info` contains `NotchSingleInput` and `NotchOutputNode`;

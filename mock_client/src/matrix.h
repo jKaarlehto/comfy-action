@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "notch_comfy_client/client_interface.h"
+#include "comfy_extension_client/client_interface.h"
 
 #include "case_logger.h"
 
@@ -37,7 +37,7 @@ public:
     // skip. error carries the driver reason when unavailable.
     virtual bool CudaAvailable(std::string& error) = 0;
     virtual bool ReadShare(
-        const notch_comfy::CudaShareStatus& share,
+        const ComfyExtensionClientProtocol::CudaShareStatus& share,
         std::vector<uint8_t>& bytes,
         std::string& error) = 0;
 };
@@ -119,7 +119,7 @@ struct MatrixSummary
 // only a shared-setup failure short-circuits.
 // Writes conformance-result.json under options.outputRoot.
 MatrixSummary RunConformance(
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
     CaseLogger& logger,
