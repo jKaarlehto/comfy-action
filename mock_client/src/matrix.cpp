@@ -18,7 +18,7 @@
 namespace notch_mock
 {
 
-using notch_comfy::ClientProtocol;
+using ComfyExtensionClientProtocol::ClientProtocol;
 
 namespace
 {
@@ -54,7 +54,7 @@ std::vector<std::string> ExpectedTypeTransports(const std::string& type)
     return {"disk", "http"};
 }
 
-std::string ChoiceJson(const notch_comfy::OutputTransportChoice& choice)
+std::string ChoiceJson(const ComfyExtensionClientProtocol::OutputTransportChoice& choice)
 {
     std::ostringstream json;
     json << "{\"ok\":" << CaseLogger::Bool(choice.m_ok)
@@ -264,7 +264,7 @@ namespace
 
 void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
 {
-    notch_comfy::OutputTransportOptions options;
+    ComfyExtensionClientProtocol::OutputTransportOptions options;
     options.m_typeAllowedTransports = Split(row.typeAllowed);
     options.m_serverAvailableTransports = Split(row.serverAvailable);
     options.m_clientReachableTransports = Split(row.clientReachable);
@@ -277,7 +277,7 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
         options.m_requiredTransport = row.requiredOrPreference;
     }
 
-    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(options);
+    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(options);
 
     bool ok = choice.m_ok == row.expectOk && (!row.expectOk || choice.m_transport == row.expectTransport);
 
@@ -318,7 +318,7 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
 // orthogonal to transport selection.
 void RunReadinessCase(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     const std::string& caseId,
     const std::string& title,
     const std::string& description,
@@ -332,7 +332,7 @@ void RunReadinessCase(
     rec.description = description;
     rec.specRef = kSpecReadiness;
 
-    notch_comfy::HttpResponse response;
+    ComfyExtensionClientProtocol::HttpResponse response;
     std::string sendError;
     if (!http.Send(ClientProtocol::BuildRequiredFilesRequest(workflowJson), response, sendError))
     {
@@ -342,7 +342,7 @@ void RunReadinessCase(
         recorder.Record(rec);
         return;
     }
-    std::vector<notch_comfy::RequiredFile> files;
+    std::vector<ComfyExtensionClientProtocol::RequiredFile> files;
     std::string parseError;
     if (!ClientProtocol::ParseRequiredFilesResponse(response.m_body, files, parseError))
     {
@@ -469,7 +469,7 @@ std::string NamedRouteRelativeDirectory(const MatrixOptions& options)
 }
 
 bool NamedRouteConfiguredForClient(const MatrixOptions& options,
-                                   const notch_comfy::ServerDeploymentFacts& deployment)
+                                   const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
 {
     return !options.namedRouteId.empty() && !options.namedRouteClientRoot.empty() &&
            ContainsString(deployment.m_namedDiskRouteIds, options.namedRouteId);
@@ -493,7 +493,7 @@ bool IsWslPlatform()
            line.find("WSL") != std::string::npos;
 }
 
-std::vector<std::string> DeliveryServerTransports(const notch_comfy::ServerDeploymentFacts& deployment)
+std::vector<std::string> DeliveryServerTransports(const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
 {
     std::vector<std::string> transports;
     for (size_t i = 0; i < deployment.m_outputTransports.size(); ++i)
@@ -522,7 +522,7 @@ std::vector<std::string> ClientReachableTransports(
     Phase phase,
     bool namedRouteDisk,
     const MatrixOptions& options,
-    const notch_comfy::ServerDeploymentFacts& deployment)
+    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
 {
     if (phase != Phase::DeliveryRemote)
     {
@@ -646,21 +646,21 @@ std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height)
     return bytes;
 }
 
-notch_comfy::OutputTransportKind TransportKindFromName(const std::string& transport)
+ComfyExtensionClientProtocol::OutputTransportKind TransportKindFromName(const std::string& transport)
 {
     if (transport == "disk")
     {
-        return notch_comfy::OutputTransportDisk;
+        return ComfyExtensionClientProtocol::OutputTransportDisk;
     }
     if (transport == "http")
     {
-        return notch_comfy::OutputTransportHttp;
+        return ComfyExtensionClientProtocol::OutputTransportHttp;
     }
     if (transport == "cuda")
     {
-        return notch_comfy::OutputTransportCuda;
+        return ComfyExtensionClientProtocol::OutputTransportCuda;
     }
-    return notch_comfy::OutputTransportUnset;
+    return ComfyExtensionClientProtocol::OutputTransportUnset;
 }
 
 struct DeliveryRunState
@@ -672,8 +672,8 @@ struct DeliveryRunState
     bool terminalSuccess = false;
     bool outputReady = false;
     bool cudaStatus = false;
-    notch_comfy::OutputReady output;
-    notch_comfy::CudaShareStatus cudaShare;
+    ComfyExtensionClientProtocol::OutputReady output;
+    ComfyExtensionClientProtocol::CudaShareStatus cudaShare;
     std::vector<std::string> websocketFrames;
 };
 
@@ -693,15 +693,15 @@ bool WaitForDeliveryEvents(
         for (size_t i = 0; i < batch.size(); ++i)
         {
             state.websocketFrames.push_back(batch[i]);
-            notch_comfy::WebSocketEvent event;
+            ComfyExtensionClientProtocol::WebSocketEvent event;
             std::string eventError;
             if (!ClientProtocol::ParseWebSocketEvent(batch[i], event, eventError))
             {
                 continue;
             }
-            if (event.m_kind == notch_comfy::EventNotchOutputReady)
+            if (event.m_kind == ComfyExtensionClientProtocol::EventNotchOutputReady)
             {
-                std::vector<notch_comfy::OutputReady> outputs;
+                std::vector<ComfyExtensionClientProtocol::OutputReady> outputs;
                 std::string outputError;
                 if (ClientProtocol::ParseOutputReadyEvent(batch[i], outputs, outputError))
                 {
@@ -717,9 +717,9 @@ bool WaitForDeliveryEvents(
                     }
                 }
             }
-            if (event.m_kind == notch_comfy::EventNotchCudaShareStatus)
+            if (event.m_kind == ComfyExtensionClientProtocol::EventNotchCudaShareStatus)
             {
-                std::vector<notch_comfy::CudaShareStatus> shares;
+                std::vector<ComfyExtensionClientProtocol::CudaShareStatus> shares;
                 std::string cudaError;
                 if (ClientProtocol::ParseCudaShareStatusEvent(batch[i], shares, cudaError))
                 {
@@ -737,13 +737,13 @@ bool WaitForDeliveryEvents(
             {
                 continue;
             }
-            if (event.m_kind == notch_comfy::EventExecutionSuccess)
+            if (event.m_kind == ComfyExtensionClientProtocol::EventExecutionSuccess)
             {
                 state.terminalType = "execution_success";
                 state.terminalSuccess = true;
             }
-            else if (event.m_kind == notch_comfy::EventExecutionError ||
-                     event.m_kind == notch_comfy::EventExecutionInterrupted)
+            else if (event.m_kind == ComfyExtensionClientProtocol::EventExecutionError ||
+                     event.m_kind == ComfyExtensionClientProtocol::EventExecutionInterrupted)
             {
                 state.terminalType = event.m_type;
             }
@@ -773,7 +773,7 @@ std::string WebSocketFrameLog(const std::vector<std::string>& frames)
     return log;
 }
 
-std::string OutputReadyJson(const notch_comfy::OutputReady& output)
+std::string OutputReadyJson(const ComfyExtensionClientProtocol::OutputReady& output)
 {
     std::ostringstream json;
     json << "{\"name\":" << CaseLogger::Quote(output.m_name)
@@ -790,7 +790,7 @@ std::string OutputReadyJson(const notch_comfy::OutputReady& output)
     return json.str();
 }
 
-std::string CudaShareStatusJson(const notch_comfy::CudaShareStatus& share)
+std::string CudaShareStatusJson(const ComfyExtensionClientProtocol::CudaShareStatus& share)
 {
     std::ostringstream json;
     json << "{\"name\":" << CaseLogger::Quote(share.m_name)
@@ -841,7 +841,7 @@ std::string WebSocketSummaryJson(const DeliveryRunState& state)
 void AppendPromptDiagnostics(
     int index,
     const std::string& caseId,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     CaseLogger& logger,
     const std::string& promptId)
 {
@@ -849,11 +849,11 @@ void AppendPromptDiagnostics(
     {
         return;
     }
-    notch_comfy::HttpRequest diagRequest;
+    ComfyExtensionClientProtocol::HttpRequest diagRequest;
     diagRequest.m_method = "GET";
     diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
     diagRequest.m_contentType = "application/json";
-    notch_comfy::HttpResponse diagResponse;
+    ComfyExtensionClientProtocol::HttpResponse diagResponse;
     std::string diagError;
     if (http.Send(diagRequest, diagResponse, diagError) && !diagResponse.m_body.empty())
     {
@@ -863,7 +863,7 @@ void AppendPromptDiagnostics(
 }
 
 bool FetchPromptDiagnostics(
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     const std::string& promptId,
     std::string& body,
     std::string& error)
@@ -876,11 +876,11 @@ bool FetchPromptDiagnostics(
         return false;
     }
 
-    notch_comfy::HttpRequest diagRequest;
+    ComfyExtensionClientProtocol::HttpRequest diagRequest;
     diagRequest.m_method = "GET";
     diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
     diagRequest.m_contentType = "application/json";
-    notch_comfy::HttpResponse diagResponse;
+    ComfyExtensionClientProtocol::HttpResponse diagResponse;
     std::string sendError;
     if (!http.Send(diagRequest, diagResponse, sendError))
     {
@@ -914,7 +914,7 @@ std::vector<std::string> MissingDiagnosticsEvents(
 void AppendDeliveryEvidence(
     int index,
     const std::string& caseId,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     CaseLogger& logger,
     const MatrixOptions& options,
     const long logStart,
@@ -1049,11 +1049,11 @@ VerifyResult RunVerifier(const DeliveryTypeContract& contract,
 
 void RunFilePathDeliveryCase(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     CaseLogger& logger,
     const MatrixOptions& options,
-    const notch_comfy::ServerDeploymentFacts& deployment,
+    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
     const std::string& caseId,
     const std::string& title,
     const std::string& description,
@@ -1076,12 +1076,12 @@ void RunFilePathDeliveryCase(
 
     const std::vector<std::string> clientReachable =
         ClientReachableTransports(options.phase, useNamedRouteDisk, options, deployment);
-    notch_comfy::OutputTransportOptions selectionOptions;
+    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
     selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(contract);
     selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
     selectionOptions.m_clientReachableTransports = clientReachable;
     selectionOptions.m_requiredTransport = transport;
-    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
 
     std::ostringstream negotiation;
     negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
@@ -1145,7 +1145,7 @@ void RunFilePathDeliveryCase(
 
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson(contract.inputType, contract.slotName);
-    notch_comfy::WorkflowSubmissionRequest req;
+    ComfyExtensionClientProtocol::WorkflowSubmissionRequest req;
     req.m_workflowJson = workflowJson;
     req.m_clientId = options.clientId;
     req.m_consumerId = consumerId;
@@ -1156,16 +1156,16 @@ void RunFilePathDeliveryCase(
     // the fixture bytes by multipart so the bytes really travel client->server.
     if (contract.outputType == "file_path")
     {
-        req.m_inputs.push_back(notch_comfy::InputValue::String("test_input", sourcePath, contract.inputType));
+        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::String("test_input", sourcePath, contract.inputType));
     }
     else if (inlineInput)
     {
-        req.m_inputs.push_back(notch_comfy::InputValue::Json("test_input", kCameraInlineJson, contract.inputType));
+        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::Json("test_input", kCameraInlineJson, contract.inputType));
     }
     else
     {
         const std::string uploadName = contract.fixtureFile.empty() ? "input.bin" : contract.fixtureFile;
-        req.m_inputs.push_back(notch_comfy::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
+        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
     }
     req.m_output.m_transport = TransportKindFromName(transport);
     req.m_output.m_type = contract.outputType;
@@ -1195,7 +1195,7 @@ void RunFilePathDeliveryCase(
         return;
     }
 
-    notch_comfy::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
+    ComfyExtensionClientProtocol::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
     if (!built.m_ok)
     {
         ws.Close();
@@ -1207,7 +1207,7 @@ void RunFilePathDeliveryCase(
     }
 
     const long logStart = FileSize(ServerLogPath(options));
-    notch_comfy::HttpResponse injectResponse;
+    ComfyExtensionClientProtocol::HttpResponse injectResponse;
     std::string sendError;
     if (!http.Send(built.m_request, injectResponse, sendError))
     {
@@ -1219,7 +1219,7 @@ void RunFilePathDeliveryCase(
         return;
     }
 
-    notch_comfy::WorkflowSubmissionResult submission;
+    ComfyExtensionClientProtocol::WorkflowSubmissionResult submission;
     std::string parseError;
     const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
     DeliveryRunState state;
@@ -1266,10 +1266,10 @@ void RunFilePathDeliveryCase(
         }
         else if (transport == "http")
         {
-            notch_comfy::HttpRequest getRequest;
+            ComfyExtensionClientProtocol::HttpRequest getRequest;
             getRequest.m_method = "GET";
             getRequest.m_path = state.output.m_url;
-            notch_comfy::HttpResponse getResponse;
+            ComfyExtensionClientProtocol::HttpResponse getResponse;
             std::string getError;
             const bool sent = http.Send(getRequest, getResponse, getError);
             outputHttpStatus = getResponse.m_statusCode;
@@ -1428,11 +1428,11 @@ void RunFilePathDeliveryCase(
 
 void RunCudaDeliveryCase(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     CaseLogger& logger,
     const MatrixOptions& options,
-    const notch_comfy::ServerDeploymentFacts& deployment,
+    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
     ICudaShareReader* cudaReader,
     const std::string& caseId,
     const std::string& title,
@@ -1448,12 +1448,12 @@ void RunCudaDeliveryCase(
     rec.requiredTransport = "cuda";
 
     const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
-    notch_comfy::OutputTransportOptions selectionOptions;
+    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
     selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"cuda", "disk", "http"};
     selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
     selectionOptions.m_clientReachableTransports = clientReachable;
     selectionOptions.m_requiredTransport = "cuda";
-    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
 
     std::ostringstream negotiation;
     negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
@@ -1508,21 +1508,21 @@ void RunCudaDeliveryCase(
 
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson("IMAGE", "image");
-    notch_comfy::WorkflowSubmissionRequest req;
+    ComfyExtensionClientProtocol::WorkflowSubmissionRequest req;
     req.m_workflowJson = workflowJson;
     req.m_clientId = options.clientId;
     req.m_consumerId = consumerId;
     req.m_execute = true;
     req.m_broadcastWs = true;
-    notch_comfy::InputValue imageInput =
-        notch_comfy::InputValue::Binary("test_input", imageBytes, "cuda_input.float32rgb", "IMAGE");
+    ComfyExtensionClientProtocol::InputValue imageInput =
+        ComfyExtensionClientProtocol::InputValue::Binary("test_input", imageBytes, "cuda_input.float32rgb", "IMAGE");
     imageInput.m_rawBuffer.m_enabled = true;
     imageInput.m_rawBuffer.m_width = width;
     imageInput.m_rawBuffer.m_height = height;
     imageInput.m_rawBuffer.m_format = "float32_rgb";
     imageInput.m_rawBuffer.m_stride = width * 3 * 4;
     req.m_inputs.push_back(imageInput);
-    req.m_output.m_transport = notch_comfy::OutputTransportCuda;
+    req.m_output.m_transport = ComfyExtensionClientProtocol::OutputTransportCuda;
     req.m_output.m_type = "image";
 
     std::string wsError;
@@ -1536,7 +1536,7 @@ void RunCudaDeliveryCase(
         return;
     }
 
-    notch_comfy::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
+    ComfyExtensionClientProtocol::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
     if (!built.m_ok)
     {
         ws.Close();
@@ -1548,7 +1548,7 @@ void RunCudaDeliveryCase(
     }
 
     const long logStart = FileSize(ServerLogPath(options));
-    notch_comfy::HttpResponse injectResponse;
+    ComfyExtensionClientProtocol::HttpResponse injectResponse;
     std::string sendError;
     if (!http.Send(built.m_request, injectResponse, sendError))
     {
@@ -1560,7 +1560,7 @@ void RunCudaDeliveryCase(
         return;
     }
 
-    notch_comfy::WorkflowSubmissionResult submission;
+    ComfyExtensionClientProtocol::WorkflowSubmissionResult submission;
     std::string parseError;
     const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
     DeliveryRunState state;
@@ -1577,10 +1577,10 @@ void RunCudaDeliveryCase(
     // device allocation and make both the info endpoint 404 and the IPC handle
     // stale (CUDA_ERROR_INVALID_HANDLE). Close only after the bytes are read.
 
-    notch_comfy::HttpRequest infoRequest;
+    ComfyExtensionClientProtocol::HttpRequest infoRequest;
     infoRequest.m_method = "GET";
     infoRequest.m_path = "/notch/cuda/share/" + consumerId;
-    notch_comfy::HttpResponse infoResponse;
+    ComfyExtensionClientProtocol::HttpResponse infoResponse;
     std::string infoError;
     bool infoOk = http.Send(infoRequest, infoResponse, infoError) && infoResponse.m_statusCode == 200;
 
@@ -1827,13 +1827,13 @@ void WriteResultFile(const std::string& outputRoot, const std::string& phaseName
 // transport-selection matrix, and the WS handshake check. No execution.
 void RunNegotiationCases(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
-    const notch_comfy::ServerCompatibilityFacts& serverCompat)
+    const ComfyExtensionClientProtocol::ServerCompatibilityFacts& serverCompat)
 {
     // 3. Server/plugin protocol compatibility.
-    notch_comfy::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
+    ComfyExtensionClientProtocol::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
     {
         std::ostringstream actual;
         actual << "{\"ok\":" << CaseLogger::Bool(compat.m_ok)
@@ -1874,7 +1874,7 @@ void RunNegotiationCases(
     }
     else
     {
-        notch_comfy::HttpResponse parseResponse;
+        ComfyExtensionClientProtocol::HttpResponse parseResponse;
         std::string sendError;
         if (!http.Send(ClientProtocol::BuildWorkflowDiscoveryRequest(options.parseWorkflowJson), parseResponse, sendError))
         {
@@ -1891,7 +1891,7 @@ void RunNegotiationCases(
         }
         else
         {
-            notch_comfy::WorkflowContract contract;
+            ComfyExtensionClientProtocol::WorkflowContract contract;
             std::string contractError;
             if (!ClientProtocol::ParseWorkflowContract(parseResponse.m_body, contract, contractError))
             {
@@ -1910,7 +1910,7 @@ void RunNegotiationCases(
             {
                 for (size_t i = 0; i < contract.m_outputs.size(); ++i)
                 {
-                    const notch_comfy::ContractOutput& output = contract.m_outputs[i];
+                    const ComfyExtensionClientProtocol::ContractOutput& output = contract.m_outputs[i];
                     std::vector<std::string> expected = ExpectedTypeTransports(output.m_type);
                     bool ok = Sorted(expected) == Sorted(output.m_transports);
 
@@ -2048,12 +2048,12 @@ void RunRejectCase(
     const std::vector<std::string>& serverAvailable,
     const std::vector<std::string>& clientReachable)
 {
-    notch_comfy::OutputTransportOptions selectionOptions;
+    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
     selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(*descriptor.type);
     selectionOptions.m_serverAvailableTransports = serverAvailable;
     selectionOptions.m_clientReachableTransports = clientReachable;
     selectionOptions.m_requiredTransport = descriptor.transport;
-    notch_comfy::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
 
     const bool ok = !choice.m_ok;
     CaseRecord rec;
@@ -2111,11 +2111,11 @@ void RunSkipCase(
 // topology is emitted as self-clearing skips instead.
 void RunTopologyCases(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     CaseLogger& logger,
     const MatrixOptions& options,
-    const notch_comfy::ServerDeploymentFacts& deployment,
+    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
     ICudaShareReader* cudaReader,
     const TopologyConfig& topology,
     bool useNamedRouteDisk,
@@ -2152,11 +2152,11 @@ void RunTopologyCases(
 
 void RunDeliveryCases(
     CaseRecorder& recorder,
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
     CaseLogger& logger,
-    const notch_comfy::ServerDeploymentFacts& deployment,
+    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
     ICudaShareReader* cudaReader)
 {
     const std::vector<std::string> server = DeliveryServerTransports(deployment);
@@ -2198,7 +2198,7 @@ const char* PhaseName(Phase phase)
 } // namespace
 
 MatrixSummary RunConformance(
-    notch_comfy::IHttpTransport& http,
+    ComfyExtensionClientProtocol::IHttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
     CaseLogger& logger,
@@ -2209,7 +2209,7 @@ MatrixSummary RunConformance(
 
     // 1. Record the linked-against C++ client facts. A protocol range that
     //    disagrees with the checked-out extension is then diagnosable offline.
-    notch_comfy::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
+    ComfyExtensionClientProtocol::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
     {
         std::ostringstream json;
         json << "{\"record\":\"cpp_client_compatibility_facts\""
@@ -2225,7 +2225,7 @@ MatrixSummary RunConformance(
     }
 
     // 2. Shared setup: live GET /features must be reachable and parseable.
-    notch_comfy::HttpResponse featuresResponse;
+    ComfyExtensionClientProtocol::HttpResponse featuresResponse;
     std::string transportError;
     if (!http.Send(ClientProtocol::BuildServerFeaturesRequest(), featuresResponse, transportError))
     {
@@ -2235,8 +2235,8 @@ MatrixSummary RunConformance(
         return summary;
     }
 
-    notch_comfy::ServerCompatibilityFacts serverCompat;
-    notch_comfy::ServerDeploymentFacts deployment;
+    ComfyExtensionClientProtocol::ServerCompatibilityFacts serverCompat;
+    ComfyExtensionClientProtocol::ServerDeploymentFacts deployment;
     std::string parseError;
     if (!ClientProtocol::ParseServerCompatibilityFacts(featuresResponse.m_body, serverCompat, parseError) ||
         !ClientProtocol::ParseServerDeploymentFacts(featuresResponse.m_body, deployment, parseError))

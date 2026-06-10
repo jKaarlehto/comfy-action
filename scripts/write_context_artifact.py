@@ -27,7 +27,7 @@ def write_metadata_artifact(output: Path, metadata_path: Path, *, result: str, e
             "source_of_truth": "pyproject.toml",
             "generated_artifacts": [
                 "core/_generated_versions.py",
-                "cpp/notch_comfy_client/include/notch_comfy_client/version.hpp",
+                "cpp/comfy_extension_client/include/comfy_extension_client/version.hpp",
                 "compatibility/current.json",
                 "compatibility/releases.json",
             ],

@@ -1,5 +1,5 @@
 name: "Notch-Comfy conformance"
-description: "Verify the notch_comfy_client C++ interface conforms to the ComfyUI-Notch extension protocol, in a Docker container"
+description: "Verify the comfy_extension_client C++ interface conforms to the ComfyUI-Notch extension protocol, in a Docker container"
 
 inputs:
   mode:

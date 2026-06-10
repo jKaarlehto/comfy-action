@@ -207,8 +207,8 @@ def poll_url(url: str, timeout_seconds: int) -> None:
 def copy_extension(source: Path, destination: Path) -> None:
     if not (source / "nodes.py").is_file():
         raise RunnerError(f"extension source does not look like ComfyUI-Notch: {source}")
-    if not (source / "cpp" / "notch_comfy_client" / "CMakeLists.txt").is_file():
-        raise RunnerError(f"extension source is missing cpp/notch_comfy_client: {source}")
+    if not (source / "cpp" / "comfy_extension_client" / "CMakeLists.txt").is_file():
+        raise RunnerError(f"extension source is missing cpp/comfy_extension_client: {source}")
     if destination.exists():
         shutil.rmtree(destination)
 
@@ -365,16 +365,16 @@ def install_python_deps(
 
 
 def compile_cpp_client(runner: CommandRunner, extension_dir: Path, workdir: Path) -> None:
-    source_dir = extension_dir / "cpp" / "notch_comfy_client"
-    build_dir = workdir / "cpp-build" / "notch_comfy_client"
+    source_dir = extension_dir / "cpp" / "comfy_extension_client"
+    build_dir = workdir / "cpp-build" / "comfy_extension_client"
     runner.run(
         ["cmake", "-S", str(source_dir), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release", "-G", "Ninja"],
         log_name="cpp-compile.log",
     )
     runner.run(["cmake", "--build", str(build_dir), "--config", "Release"], log_name="cpp-compile.log")
-    exe = build_dir / "notch_comfy_client_compile_check"
+    exe = build_dir / "comfy_extension_client_compile_check"
     if not exe.exists():
-        exe = build_dir / "Release" / "notch_comfy_client_compile_check.exe"
+        exe = build_dir / "Release" / "comfy_extension_client_compile_check.exe"
     if not exe.exists():
         raise RunnerError("C++ compile check executable was not produced")
     runner.run([str(exe)], log_name="cpp-compile.log")
@@ -411,7 +411,7 @@ def build_mock_client(runner: CommandRunner, extension_dir: Path, workdir: Path)
     # The mock client links the checked-out client interface, so interface drift
     # surfaces here as a build failure with a stable, contract-framed code.
     source_dir = find_mock_client_dir()
-    client_dir = extension_dir / "cpp" / "notch_comfy_client"
+    client_dir = extension_dir / "cpp" / "comfy_extension_client"
     build_dir = workdir / "cpp-build" / "notch_mock_client"
     configure = runner.run(
         [
@@ -420,7 +420,7 @@ def build_mock_client(runner: CommandRunner, extension_dir: Path, workdir: Path)
             str(source_dir),
             "-B",
             str(build_dir),
-            f"-DNOTCH_COMFY_CLIENT_DIR={client_dir}",
+            f"-DCOMFY_EXTENSION_CLIENT_DIR={client_dir}",
             "-DCMAKE_BUILD_TYPE=Release",
             "-G",
             "Ninja",
@@ -437,7 +437,7 @@ def build_mock_client(runner: CommandRunner, extension_dir: Path, workdir: Path)
         )
     if built.returncode != 0:
         raise MockClientBuildError(
-            "mock client transport adapters are incompatible with the current notch_comfy_client interface",
+            "mock client transport adapters are incompatible with the current comfy_extension_client interface",
             "transport_interface_incompatible",
         )
     stub = build_dir / "notch_mock_stub_check"
@@ -969,8 +969,8 @@ def main() -> int:
 
     try:
         if mode == "delivery_remote_client":
-            if not (workspace / "cpp" / "notch_comfy_client" / "CMakeLists.txt").is_file():
-                raise RunnerError(f"workspace is missing cpp/notch_comfy_client: {workspace}")
+            if not (workspace / "cpp" / "comfy_extension_client" / "CMakeLists.txt").is_file():
+                raise RunnerError(f"workspace is missing cpp/comfy_extension_client: {workspace}")
 
             base_url = f"{DEFAULT_COMFY_SCHEME}://{args.host}:{args.port}"
             poll_url(f"{base_url}/queue", args.timeout)

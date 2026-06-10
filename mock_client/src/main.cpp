@@ -1,4 +1,4 @@
-// notch_mock_client: the CI consumer of cpp/notch_comfy_client. It wires the
+// notch_mock_client: the CI consumer of cpp/comfy_extension_client. It wires the
 // IXWebSocket-backed transports into the transport-agnostic conformance
 // orchestration and runs the selected phase (negotiation, delivery-local, or
 // delivery-remote).

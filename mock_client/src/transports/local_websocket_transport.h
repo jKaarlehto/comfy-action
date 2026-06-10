@@ -17,7 +17,7 @@ namespace notch_mock
 // backed by ix::WebSocket. Connects to /ws?clientId=<id>, sends text, and
 // records received text frames to <outputRoot>/conformance/websocket.jsonl.
 class LocalWebSocketTransport : public IWebSocketProbe,
-                                public notch_comfy::IWebSocketTransport
+                                public ComfyExtensionClientProtocol::IWebSocketTransport
 {
 public:
     LocalWebSocketTransport(const std::string& url, const std::string& outputRoot);

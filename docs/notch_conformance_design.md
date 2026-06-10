@@ -83,7 +83,7 @@ CI product:
 - Pin each run to an explicit ComfyUI release tag, branch, or commit.
 - Verify that ComfyUI starts with `ComfyUI-Notch` installed.
 - Verify that `/object_info` contains the cross-platform Notch node classes.
-- Verify that `cpp/notch_comfy_client` compiles.
+- Verify that `cpp/comfy_extension_client` compiles.
 - Record the Python, CUDA, Docker-host, ComfyUI, and extension facts needed to
   reproduce a successful or failed run.
 - In `protocol_negotiation` mode, verify negotiation-axis positives and negatives
@@ -157,7 +157,7 @@ reproducible from `mode + comfyui_ref + extension_ref + action commit`.
 8. Build and run the C++ compile-check target:
 
    ```text
-   cpp/notch_comfy_client -> notch_comfy_client_compile_check
+   cpp/comfy_extension_client -> comfy_extension_client_compile_check
    ```
 
 9. Start ComfyUI on `<listen_address>:<port>` using
@@ -183,7 +183,7 @@ workflow execution correctness.
 
 Contract matrix mode uses a lightweight C++ mock Notch client built during the
 run. The executable lives in this action repo, links the checked-out
-`ComfyUI-Notch/cpp/notch_comfy_client` source, and provides only the transport
+`ComfyUI-Notch/cpp/comfy_extension_client` source, and provides only the transport
 adapters and orchestration needed by CI:
 
 - HTTP requests to `/notch/parse`, `/notch/inject`, and artifact GET routes.
@@ -195,7 +195,7 @@ adapters and orchestration needed by CI:
 - Local output validation and artifact writing for CI evidence.
 
 Keep this mock client in the action/test harness, not in
-`cpp/notch_comfy_client`. The client interface remains bring-your-own-transport;
+`cpp/comfy_extension_client`. The client interface remains bring-your-own-transport;
 the mock client is one consumer used by CI.
 
 The important boundary is that the mock client is a consumer of
@@ -233,12 +233,12 @@ considered, but they cover only HTTP and would force a second WebSocket
 dependency; a single library that does both keeps the harness terser.
 
 Confine the third-party transports to the adapter translation units. The matrix
-orchestration (`matrix.{h,cpp}`) depends only on `notch_comfy_client` and the
+orchestration (`matrix.{h,cpp}`) depends only on `comfy_extension_client` and the
 abstract `IHttpTransport` / `IWebSocketProbe` interfaces, so the contract logic
 stays library-agnostic and compile-checkable with a stub transport
 (`tests/stub_check.cpp`).
 
-Because the mock client links the checked-out `cpp/notch_comfy_client` source,
+Because the mock client links the checked-out `cpp/comfy_extension_client` source,
 interface drift in `ComfyUI-Notch` can make the action's `LocalHttpTransport`
 and `LocalWebSocketTransport` adapters stop conforming to the current
 `IHttpTransport` / `IWebSocketTransport` contracts. This is the most likely way
@@ -324,7 +324,7 @@ Source-of-truth implementation points in `ComfyUI-Notch`:
   publish `disk`, `http`, and `noop`, plus `cuda` only when CUDA is available.
 - `services.output_config_service.build_notch_output_config(...)`: the server
   hard-errors type/transport mismatches and unavailable CUDA requests.
-- `cpp/notch_comfy_client/src/client_interface.cpp`: the C++ helper performs the
+- `cpp/comfy_extension_client/src/client_interface.cpp`: the C++ helper performs the
   set intersection and hard requested-transport check.
 
 `noop` is deliberately outside the connected-output permutation matrix. It may
