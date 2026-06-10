@@ -43,6 +43,8 @@ find_package(CUDAToolkit QUIET)
 add_library(notch_mock_matrix STATIC
     src/matrix.cpp
     src/case_logger.cpp
+    src/facade_log.cpp
+    src/delivery_event_sink.cpp
     src/hash_utils.cpp
     src/delivery_types.cpp
     src/verify/verify_byte_exact.cpp

@@ -13,11 +13,14 @@
 namespace notch_mock
 {
 
-// IWebSocketProbe (and the interface's IWebSocketTransport, via SendText)
-// backed by ix::WebSocket. Connects to /ws?clientId=<id>, sends text, and
-// records received text frames to <outputRoot>/conformance/websocket.jsonl.
-class LocalWebSocketTransport : public IWebSocketProbe,
-                                public ComfyExtensionClientProtocol::IWebSocketTransport
+// Backed by ix::WebSocket. Implements IWebSocketProbe, which is-a
+// ComfyExtensionClient::WebSocketTransport: the harness owns the socket lifecycle
+// (Connect, drain received frames, Close) since the Client facade creates no
+// threads, and SendText carries the single outbound message the facade sends on
+// /ws — the feature-flags announce during Client::Connect(). Connects to
+// /ws?clientId=<id> and records received text frames to
+// <outputRoot>/conformance/websocket.jsonl.
+class LocalWebSocketTransport : public IWebSocketProbe
 {
 public:
     LocalWebSocketTransport(const std::string& url, const std::string& outputRoot);

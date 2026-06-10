@@ -15,18 +15,18 @@
 namespace
 {
 
-class StubHttp : public ComfyExtensionClientProtocol::IHttpTransport
+class StubHttp : public ComfyExtensionClient::HttpTransport
 {
 public:
-    bool Send(const ComfyExtensionClientProtocol::HttpRequest& request,
-              ComfyExtensionClientProtocol::HttpResponse& response,
+    bool Send(const ComfyExtensionClient::HttpRequest& request,
+              ComfyExtensionClient::HttpResponse& response,
               std::string& error) override
     {
-        const std::string& path = request.m_path;
+        const std::string& path = request.path;
         if (path == "/features")
         {
-            response.m_statusCode = 200;
-            response.m_body =
+            response.status_code = 200;
+            response.body =
                 "{\"extension\":{\"notch\":{"
                 "\"plugin_version\":\"0.3.0\","
                 "\"protocol_version\":\"0.3.0\","
@@ -42,8 +42,8 @@ public:
         {
             // Both type-axis equivalence classes: image (cuda,disk,http) and a
             // non-image FILE_3D output (disk,http).
-            response.m_statusCode = 200;
-            response.m_body =
+            response.status_code = 200;
+            response.body =
                 "{\"inputs\":[],\"schema\":{},\"outputs\":["
                 "{\"name\":\"image\",\"type\":\"IMAGE\",\"transports\":[\"cuda\",\"disk\",\"http\"]},"
                 "{\"name\":\"mesh\",\"type\":\"FILE_3D_GLB\",\"transports\":[\"disk\",\"http\"]}]}";
@@ -51,17 +51,17 @@ public:
         }
         if (path == "/notch/get-required-files")
         {
-            response.m_statusCode = 200;
+            response.status_code = 200;
             // The "missing" fixture references a file the server cannot reach.
-            if (request.m_body.find("missing") != std::string::npos)
+            if (request.body.find("missing") != std::string::npos)
             {
-                response.m_body =
+                response.body =
                     "{\"files\":[{\"filename\":\"absent.safetensors\",\"category\":\"checkpoints\","
                     "\"full_path\":\"/models/checkpoints/absent.safetensors\",\"exists\":false}]}";
             }
             else
             {
-                response.m_body =
+                response.body =
                     "{\"files\":[{\"filename\":\"present.safetensors\",\"category\":\"checkpoints\","
                     "\"full_path\":\"/models/checkpoints/present.safetensors\",\"exists\":true}]}";
             }
@@ -69,22 +69,22 @@ public:
         }
         if (path.find("/notch/inject") != std::string::npos)
         {
-            response.m_statusCode = 200;
+            response.status_code = 200;
             // A workflow referencing a missing file is rejected at inject (blocked).
-            if (request.m_body.find("missing_ckpt") != std::string::npos)
+            if (request.body.find("missing_ckpt") != std::string::npos)
             {
-                response.m_body = "{\"error\":\"required input file is missing\"}";
+                response.body = "{\"error\":\"required input file is missing\"}";
             }
             else
             {
-                response.m_body = "{\"queued\":true,\"prompt_id\":\"psuccess\"}";
+                response.body = "{\"queued\":true,\"prompt_id\":\"psuccess\"}";
             }
             return true;
         }
         if (path.find("/notch/diagnostics") != std::string::npos)
         {
-            response.m_statusCode = 200;
-            response.m_body = "{\"ci_enabled\":true,\"prompt_id\":\"psuccess\",\"count\":0,\"records\":[]}";
+            response.status_code = 200;
+            response.body = "{\"ci_enabled\":true,\"prompt_id\":\"psuccess\",\"count\":0,\"records\":[]}";
             return true;
         }
         error = "unexpected path " + path;

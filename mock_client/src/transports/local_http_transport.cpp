@@ -15,20 +15,22 @@ LocalHttpTransport::LocalHttpTransport(const std::string& baseUrl, const std::st
 {
 }
 
-bool LocalHttpTransport::Send(const ComfyExtensionClientProtocol::HttpRequest& request,
-                              ComfyExtensionClientProtocol::HttpResponse& response,
+bool LocalHttpTransport::Send(const ComfyExtensionClient::HttpRequest& request,
+                              ComfyExtensionClient::HttpResponse& response,
                               std::string& error)
 {
-    ix::HttpClient client(/*async=*/false);
-    const std::string url = m_baseUrl + request.m_path;
+    m_lastRequest = request;
 
-    ix::HttpRequestArgsPtr args = client.createRequest(url, request.m_method);
-    if (!request.m_contentType.empty())
+    ix::HttpClient client(/*async=*/false);
+    const std::string url = m_baseUrl + request.path;
+
+    ix::HttpRequestArgsPtr args = client.createRequest(url, request.method);
+    if (!request.content_type.empty())
     {
-        args->extraHeaders["Content-Type"] = request.m_contentType;
+        args->extraHeaders["Content-Type"] = request.content_type;
     }
 
-    ix::HttpResponsePtr res = client.request(url, request.m_method, request.m_body, args);
+    ix::HttpResponsePtr res = client.request(url, request.method, request.body, args);
 
     bool ok = true;
     if (!res)
@@ -38,8 +40,8 @@ bool LocalHttpTransport::Send(const ComfyExtensionClientProtocol::HttpRequest& r
     }
     else
     {
-        response.m_statusCode = res->statusCode;
-        response.m_body = res->body;
+        response.status_code = res->statusCode;
+        response.body = res->body;
         if (res->statusCode <= 0)
         {
             error = res->errorMsg.empty() ? "http transport error" : res->errorMsg;
@@ -48,11 +50,11 @@ bool LocalHttpTransport::Send(const ComfyExtensionClientProtocol::HttpRequest& r
     }
 
     std::ostringstream record;
-    record << "{\"method\":" << CaseLogger::Quote(request.m_method)
-           << ",\"path\":" << CaseLogger::Quote(request.m_path)
+    record << "{\"method\":" << CaseLogger::Quote(request.method)
+           << ",\"path\":" << CaseLogger::Quote(request.path)
            << ",\"status\":" << (res ? res->statusCode : -1)
-           << ",\"request_bytes\":" << request.m_body.size()
-           << ",\"response_bytes\":" << response.m_body.size()
+           << ",\"request_bytes\":" << request.body.size()
+           << ",\"response_bytes\":" << response.body.size()
            << ",\"ok\":" << CaseLogger::Bool(ok);
     if (!ok)
     {

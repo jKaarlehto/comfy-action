@@ -198,27 +198,52 @@ Keep this mock client in the action/test harness, not in
 `cpp/comfy_extension_client`. The client interface remains bring-your-own-transport;
 the mock client is one consumer used by CI.
 
-The important boundary is that the mock client is a consumer of
-`notch_client_interface`, not a second protocol implementation. It must:
+The important boundary is that the mock client is a consumer of the **high-level
+`ComfyExtensionClient::Client` facade** — the same service-facing API a real Notch
+integrator links against — not a second protocol implementation and not a
+hand-rolled driver over the low-level wire builders. Every live-server interaction
+goes through the facade so the suite exercises the shipped client end to end:
 
-1. Build `/notch/parse` requests with `ClientProtocol::BuildWorkflowDiscoveryRequest`.
-2. Parse server feature facts with `ParseServerCompatibilityFacts` and
-   `ParseServerDeploymentFacts`.
-3. Parse workflow contracts with `ParseWorkflowContract`.
-4. Select transports with `SelectOutputTransport`.
-5. Use `BuildWorkflowSubmissionRequest` and `ParseWorkflowSubmissionResponse`
-   for delivery cases.
-6. Parse WebSocket text through `ParseWebSocketEvent`,
-   `ParseCudaShareStatusEvent`, and `ParseOutputReadyEvent` for delivery
-   evidence and verdicts.
+1. `Client::Discover()` / `Client::Connect()` read server facts, gate protocol
+   compatibility, and announce the client's feature flags on the WebSocket.
+2. `Client::ParseWorkflow()` parses `/notch/parse` and caches the workflow
+   contract (the cache that Submit's pre-flight validation and the stateful
+   transport selection rely on).
+3. `Client::SelectOutputTransport()` performs transport negotiation — both the
+   explicit-set overload (the deterministic selection matrix and reject cases)
+   and the stateful `(workflow_json, output_name, policy)` overload that resolves
+   type-allowed and server-available sets from the cached contract and session.
+4. `Client::GetRequiredFiles()` drives the deployment-readiness decision.
+5. `Client::Submit()` validates against the cached contract (pre-flight
+   missing-input rejection) and sends the inject request for delivery cases.
+6. Incoming WebSocket frames are forwarded to `Client::OnWebSocketText()`; the
+   facade parses, correlates prompt → consumer, and dispatches typed events to a
+   `ClientEventSink`. `Client::FetchOutput()` retrieves HTTP artifacts.
 
-The mock client should provide small concrete transport adapters:
+The harness owns only what the facade deliberately does not: the socket lifecycle
+(`Connect`/`DrainReceived`/`Close` — the facade is threadless), disk reads, and
+CUDA IPC import. Beyond delivering bytes, the suite asserts facade-owned behavior
+against the live server — contract caching, pre-flight validation, and
+prompt → consumer correlation — in the `facade-behavior` case and the http
+delivery case. The low-level `ComfyExtensionClientProtocol` wire layer stays
+covered by the vendored `tests/compile_check.cpp` / `stub_check.cpp`; the delivery
+path no longer calls it directly. A semantic trace of every facade action is
+written to `facade-trace.log` (and `mock-client.jsonl`) alongside the raw
+`http.jsonl` / `websocket.jsonl` wire logs.
 
-- `LocalHttpTransport`: sends local HTTP/1.1 requests to the ComfyUI server and
-  writes sanitized request/response records to `http.jsonl`.
-- `LocalWebSocketTransport`: connects to `/ws?clientId=<case-client-id>`,
-  performs the local WebSocket handshake, supports text send, records received
-  text frames to `websocket.jsonl`, and is sufficient for later execution cases.
+The mock client should provide small concrete transport adapters implementing the
+facade's transport interfaces (`ComfyExtensionClient::HttpTransport` /
+`WebSocketTransport`) so the `Client` drives them directly:
+
+- `LocalHttpTransport` (`: ComfyExtensionClient::HttpTransport`): sends local
+  HTTP/1.1 requests to the ComfyUI server and writes sanitized request/response
+  records to `http.jsonl`.
+- `LocalWebSocketTransport` (`: IWebSocketProbe`, which is-a
+  `ComfyExtensionClient::WebSocketTransport`): connects to
+  `/ws?clientId=<case-client-id>`, performs the local WebSocket handshake,
+  supports text send (the facade's feature-flags announce), records received text
+  frames to `websocket.jsonl`, and exposes `DrainReceived` so the harness can
+  forward frames into `Client::OnWebSocketText`.
 - `CaseLogger`: writes `mock-client.jsonl`, case summaries, and stable failure
   codes. It should favor readable records over clever abstractions.
 
@@ -234,14 +259,15 @@ dependency; a single library that does both keeps the harness terser.
 
 Confine the third-party transports to the adapter translation units. The matrix
 orchestration (`matrix.{h,cpp}`) depends only on `comfy_extension_client` and the
-abstract `IHttpTransport` / `IWebSocketProbe` interfaces, so the contract logic
-stays library-agnostic and compile-checkable with a stub transport
-(`tests/stub_check.cpp`).
+abstract `ComfyExtensionClient::HttpTransport` / `IWebSocketProbe` interfaces, so
+the contract logic stays library-agnostic and compile-checkable with a stub
+transport (`tests/stub_check.cpp`).
 
 Because the mock client links the checked-out `cpp/comfy_extension_client` source,
 interface drift in `ComfyUI-Notch` can make the action's `LocalHttpTransport`
 and `LocalWebSocketTransport` adapters stop conforming to the current
-`IHttpTransport` / `IWebSocketTransport` contracts. This is the most likely way
+`ComfyExtensionClient::HttpTransport` / `WebSocketTransport` contracts (or the
+`Client` facade API the orchestration drives). This is the most likely way
 a green action turns red after an otherwise unrelated extension change, so it
 must fail loudly, not cryptically:
 
@@ -254,7 +280,7 @@ must fail loudly, not cryptically:
   `conformance-result.json`, instead of letting a raw CMake error abort the
   job with no contract framing.
 - **Startup version facts.** On every run the mock client logs
-  `ClientProtocol::GetClientCompatibilityFacts()` — C++ client source version,
+  `ComfyExtensionClient::Client::facts()` — C++ client source version,
   C++ API version, protocol version, supported protocol range, capabilities,
   source git commit/tag, and handled Notch WebSocket events — as the first
   record in `mock-client.jsonl` and into `environment.json`. The live plugin

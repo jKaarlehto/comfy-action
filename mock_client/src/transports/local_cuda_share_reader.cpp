@@ -84,30 +84,30 @@ bool LocalCudaShareReader::CudaAvailable(std::string& error)
 }
 
 bool LocalCudaShareReader::ReadShare(
-    const ComfyExtensionClientProtocol::CudaShareStatus& share,
+    const ComfyExtensionClient::CudaShareStatus& share,
     std::vector<uint8_t>& bytes,
     std::string& error)
 {
     bytes.clear();
-    if (share.m_ipcHandleHex.empty())
+    if (share.ipc_handle_hex.empty())
     {
         error = "cuda share status did not include ipc_handle";
         return false;
     }
-    if (share.m_dataSizeBytes <= 0)
+    if (share.data_size_bytes <= 0)
     {
         error = "cuda share status did not include data_size_bytes";
         return false;
     }
 
     std::vector<uint8_t> handleBytes;
-    if (!HexToBytes(share.m_ipcHandleHex, handleBytes) || handleBytes.size() != sizeof(cudaIpcMemHandle_t))
+    if (!HexToBytes(share.ipc_handle_hex, handleBytes) || handleBytes.size() != sizeof(cudaIpcMemHandle_t))
     {
         error = "cuda ipc_handle is not a 64-byte hex handle";
         return false;
     }
 
-    const int deviceIndex = share.m_cudaDeviceIndex >= 0 ? share.m_cudaDeviceIndex : 0;
+    const int deviceIndex = share.cuda_device_index >= 0 ? share.cuda_device_index : 0;
     // Restore the previous current device on every exit so binding the share's
     // device for this import cannot leak into the next case.
     DeviceGuard deviceGuard;
@@ -141,10 +141,10 @@ bool LocalCudaShareReader::ReadShare(
         return false;
     }
 
-    bytes.resize(static_cast<size_t>(share.m_dataSizeBytes));
+    bytes.resize(static_cast<size_t>(share.data_size_bytes));
     const cudaError_t copyResult = cudaMemcpy(
         &bytes[0],
-        static_cast<const char*>(devicePtr) + share.m_dataOffset,
+        static_cast<const char*>(devicePtr) + share.data_offset,
         bytes.size(),
         cudaMemcpyDeviceToHost);
 
@@ -156,7 +156,7 @@ bool LocalCudaShareReader::ReadShare(
         bytes.clear();
         return false;
     }
-    std::printf("cuda reader: opened share '%s' via runtime api (cudaIpcOpenMemHandle)\n", share.m_name.c_str());
+    std::printf("cuda reader: opened share '%s' via runtime api (cudaIpcOpenMemHandle)\n", share.name.c_str());
     std::fflush(stdout);
     return true;
 }

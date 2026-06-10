@@ -11,7 +11,7 @@ class LocalCudaShareReader : public ICudaShareReader
 public:
     bool CudaAvailable(std::string& error) override;
     bool ReadShare(
-        const ComfyExtensionClientProtocol::CudaShareStatus& share,
+        const ComfyExtensionClient::CudaShareStatus& share,
         std::vector<uint8_t>& bytes,
         std::string& error) override;
 };
