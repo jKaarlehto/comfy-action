@@ -26,20 +26,34 @@ trap 'rm -rf "$tmp"' EXIT
 common=(-std=c++14 -Wall -Wextra
   -I "$iface/include" -I "$iface/third_party/jsonxx" -I "$mock_root/src")
 
-echo "== compile_check (client interface) =="
+# The whole vendored facade source set (Client + protocol codecs); the mock now
+# drives the high-level ComfyExtensionClient::Client, so the behavioural
+# compile_check links the same sources the iface CMakeLists builds.
+iface_sources=(
+  "$iface/src/client.cpp"
+  "$iface/src/client_interface.cpp"
+  "$iface/src/client_interface_values.cpp"
+  "$iface/src/contract.cpp"
+  "$iface/src/protocol_current.cpp"
+  "$iface/src/protocol_v0_3.cpp"
+  "$iface/src/types.cpp"
+  "$iface/third_party/jsonxx/jsonxx.cc"
+)
+
+echo "== compile_check (client facade) =="
 g++ "${common[@]}" \
-  "$iface/tests/compile_check.cpp" "$iface/src/client_interface.cpp" \
-  "$iface/third_party/jsonxx/jsonxx.cc" -o "$tmp/compile_check"
+  "$iface/tests/compile_check.cpp" "${iface_sources[@]}" -o "$tmp/compile_check"
 "$tmp/compile_check"
 echo "compile_check OK"
 
 echo "== conformance stub self-test =="
 g++ "${common[@]}" \
   "$mock_root/tests/stub_check.cpp" "$mock_root/src/matrix.cpp" "$mock_root/src/case_logger.cpp" \
+  "$mock_root/src/facade_log.cpp" "$mock_root/src/delivery_event_sink.cpp" \
   "$mock_root/src/hash_utils.cpp" "$mock_root/src/delivery_types.cpp" \
   "$mock_root/src/verify/verify_byte_exact.cpp" "$mock_root/src/verify/verify_integrity.cpp" \
   "$mock_root/src/verify/verify_structural.cpp" \
-  "$iface/src/client_interface.cpp" "$iface/third_party/jsonxx/jsonxx.cc" -o "$tmp/stub_check"
+  "${iface_sources[@]}" -o "$tmp/stub_check"
 (cd "$tmp" && "$tmp/stub_check")
 rm -rf "$tmp/stub-out"
 
@@ -49,7 +63,7 @@ g++ "${common[@]}" \
   "$mock_root/src/verify/verify_byte_exact.cpp" "$mock_root/src/verify/verify_integrity.cpp" \
   "$mock_root/src/verify/verify_structural.cpp" \
   "$mock_root/src/case_logger.cpp" "$mock_root/src/hash_utils.cpp" \
-  "$iface/src/client_interface.cpp" "$iface/third_party/jsonxx/jsonxx.cc" -o "$tmp/verify_check"
+  "${iface_sources[@]}" -o "$tmp/verify_check"
 "$tmp/verify_check"
 
 echo "local build check OK"

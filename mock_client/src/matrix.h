@@ -4,23 +4,26 @@
 #include <string>
 #include <vector>
 
-#include "comfy_extension_client/client_interface.h"
+#include "comfy_extension_client/client.hpp"
 
 #include "case_logger.h"
 
 namespace notch_mock
 {
 
-// Minimal WebSocket probe used by the Layer 1 handshake case. It is a
-// superset of the interface's IWebSocketTransport (which only sends) so the
-// orchestration can connect, send the feature-flags message, and drain received
-// frames for evidence without depending on the concrete transport library.
-class IWebSocketProbe
+// Minimal WebSocket probe owned by the harness. The Client facade creates no
+// threads, so the harness owns the socket lifecycle: connect, drain received
+// frames, and feed them back into Client::OnWebSocketText. It IS-A
+// ComfyExtensionClient::WebSocketTransport (inheriting its SendText), so a single
+// probe reference doubles as the facade's outbound transport for the
+// feature-flags announce the facade sends during Client::Connect().
+class IWebSocketProbe : public ComfyExtensionClient::WebSocketTransport
 {
 public:
     virtual ~IWebSocketProbe() {}
     virtual bool Connect(int timeoutMs, std::string& error) = 0;
-    virtual bool SendText(const std::string& message, std::string& error) = 0;
+    // SendText(const std::string&, std::string&) is inherited (pure virtual) from
+    // ComfyExtensionClient::WebSocketTransport.
     virtual std::vector<std::string> DrainReceived() = 0;
     virtual void Close() = 0;
 };
@@ -37,7 +40,7 @@ public:
     // skip. error carries the driver reason when unavailable.
     virtual bool CudaAvailable(std::string& error) = 0;
     virtual bool ReadShare(
-        const ComfyExtensionClientProtocol::CudaShareStatus& share,
+        const ComfyExtensionClient::CudaShareStatus& share,
         std::vector<uint8_t>& bytes,
         std::string& error) = 0;
 };
@@ -119,7 +122,7 @@ struct MatrixSummary
 // only a shared-setup failure short-circuits.
 // Writes conformance-result.json under options.outputRoot.
 MatrixSummary RunConformance(
-    ComfyExtensionClientProtocol::IHttpTransport& http,
+    ComfyExtensionClient::HttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
     CaseLogger& logger,

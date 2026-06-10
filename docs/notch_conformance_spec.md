@@ -600,13 +600,14 @@ explain a failure but never cause one.
 
 ### 9a. WebSocket lifecycle assertions (client-side, no new server work)
 
-The mock client already holds the `/ws` connection and the C++ interface already
-parses lifecycle events keyed by `prompt_id` (`ParseWebSocketEvent` →
-`EventExecutionSuccess` / `EventExecutionError` / `EventExecutionInterrupted` /
-`EventExecuted`). Per execution case:
+The mock client holds the `/ws` connection and forwards every frame into the
+facade (`Client::OnWebSocketText`), which parses lifecycle events keyed by
+`prompt_id`, correlates prompt → consumer, and dispatches typed `ClientEvent`s
+(`EventKind::ExecutionSuccess` / `ExecutionError` / `ExecutionInterrupted`) to the
+`ClientEventSink`. Per execution case:
 
-1. Submit via `/notch/inject`; read `prompt_id` from the inject response
-   (`ParseWorkflowSubmissionResponse`).
+1. Submit via `Client::Submit()` (`/notch/inject`); read `prompt_id` from the
+   returned `JobHandle`.
 2. Wait for the matching terminal event on `/ws`.
 3. Assert it: `execution_success` for positive cases; `execution_error` (with
    `exception_type`, `node_id`, `traceback`) for cases that must fail at runtime.

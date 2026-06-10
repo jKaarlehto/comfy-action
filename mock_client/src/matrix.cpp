@@ -9,7 +9,9 @@
 #include <sstream>
 #include <thread>
 
+#include "delivery_event_sink.h"
 #include "delivery_types.h"
+#include "facade_log.h"
 #include "hash_utils.h"
 #include "verify/verify_byte_exact.h"
 #include "verify/verify_integrity.h"
@@ -18,7 +20,7 @@
 namespace notch_mock
 {
 
-using ComfyExtensionClientProtocol::ClientProtocol;
+namespace cec = ComfyExtensionClient;
 
 namespace
 {
@@ -54,15 +56,16 @@ std::vector<std::string> ExpectedTypeTransports(const std::string& type)
     return {"disk", "http"};
 }
 
-std::string ChoiceJson(const ComfyExtensionClientProtocol::OutputTransportChoice& choice)
+// JSON for an OutputTransportDecision (the facade's negotiation result).
+std::string DecisionJson(const cec::OutputTransportDecision& decision)
 {
     std::ostringstream json;
-    json << "{\"ok\":" << CaseLogger::Bool(choice.m_ok)
-         << ",\"transport\":" << CaseLogger::Quote(choice.m_transport)
-         << ",\"usable\":" << CaseLogger::Array(choice.m_usableTransports);
-    if (!choice.m_error.empty())
+    json << "{\"ok\":" << CaseLogger::Bool(decision.ok)
+         << ",\"transport\":" << CaseLogger::Quote(decision.transport)
+         << ",\"usable\":" << CaseLogger::Array(decision.usable_transports);
+    if (!decision.error.empty())
     {
-        json << ",\"error\":" << CaseLogger::Quote(choice.m_error);
+        json << ",\"error\":" << CaseLogger::Quote(decision.error);
     }
     json << "}";
     return json.str();
@@ -227,6 +230,7 @@ const char* const kSpecReadiness = "notch_conformance_spec.md §4 deployment-rea
 const char* const kSpecLiveness = "notch_conformance_spec.md §4 setup/liveness (A0)";
 const char* const kSpecDeliveryLocal = "notch_conformance_spec.md §4 Layer 2 delivery-local";
 const char* const kSpecDeliveryRemote = "notch_conformance_spec.md §4 Layer 2 delivery-remote";
+const char* const kSpecFacade = "notch_conformance_spec.md §4 facade behavior (caching/validation/correlation)";
 
 } // namespace
 
@@ -262,24 +266,47 @@ private:
 namespace
 {
 
-void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
+// Build a synthetic OutputTransportRequest from explicit transport sets so the
+// facade's SelectOutputTransport drives the pure (no-server) selection matrix and
+// the reject decisions. type-allowed rides on the WorkflowOutput.transports and
+// server-available rides on ServerFacts.output_transports — the same two
+// Comfy-owned sets the facade reads from a parsed contract and negotiated session.
+cec::OutputTransportRequest MakeTransportRequest(
+    const std::vector<std::string>& typeAllowed,
+    const std::vector<std::string>& serverAvailable,
+    const std::vector<std::string>& clientReachable,
+    const std::vector<std::string>& preferenceOrder,
+    const std::string& requiredTransport)
 {
-    ComfyExtensionClientProtocol::OutputTransportOptions options;
-    options.m_typeAllowedTransports = Split(row.typeAllowed);
-    options.m_serverAvailableTransports = Split(row.serverAvailable);
-    options.m_clientReachableTransports = Split(row.clientReachable);
-    if (soft)
-    {
-        options.m_preferenceOrder = Split(row.requiredOrPreference);
-    }
-    else
-    {
-        options.m_requiredTransport = row.requiredOrPreference;
-    }
+    cec::OutputTransportRequest request;
+    request.output.name = "selection";
+    request.output.type = "synthetic";
+    request.output.transports = typeAllowed;
+    request.server.output_transports = serverAvailable;
+    request.client_reachable_transports = clientReachable;
+    request.preference_order = preferenceOrder;
+    request.required_transport = requiredTransport;
+    return request;
+}
 
-    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(options);
+void RunSelectionRow(CaseRecorder& recorder, cec::Client& client, FacadeLog& facadeLog, const SelectionRow& row, bool soft)
+{
+    const std::vector<std::string> typeAllowed = Split(row.typeAllowed);
+    const std::vector<std::string> serverAvailable = Split(row.serverAvailable);
+    const std::vector<std::string> clientReachable = Split(row.clientReachable);
+    const std::vector<std::string> preference = soft ? Split(row.requiredOrPreference) : std::vector<std::string>{};
+    const std::string required = soft ? "" : row.requiredOrPreference;
 
-    bool ok = choice.m_ok == row.expectOk && (!row.expectOk || choice.m_transport == row.expectTransport);
+    cec::OutputTransportRequest request =
+        MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, preference, required);
+    cec::OutputTransportDecision decision = client.SelectOutputTransport(request);
+
+    facadeLog.SetCase(row.id);
+    facadeLog.Action("select_output_transport",
+                     "\"transport\":" + CaseLogger::Quote(decision.transport),
+                     decision.ok ? "ok" : "fail", decision.error);
+
+    bool ok = decision.ok == row.expectOk && (!row.expectOk || decision.transport == row.expectTransport);
 
     CaseRecord rec;
     rec.caseId = row.id;
@@ -289,19 +316,19 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
     rec.specRef = soft ? kSpecSoft : kSpecHard;
     if (soft)
     {
-        rec.preferredOrder = Split(row.requiredOrPreference);
+        rec.preferredOrder = preference;
     }
     else
     {
-        rec.requiredTransport = row.requiredOrPreference;
+        rec.requiredTransport = required;
     }
     std::ostringstream fixture;
-    fixture << "{\"type_allowed\":" << CaseLogger::Array(Split(row.typeAllowed))
-            << ",\"server_available\":" << CaseLogger::Array(Split(row.serverAvailable))
-            << ",\"client_reachable\":" << CaseLogger::Array(Split(row.clientReachable)) << "}";
+    fixture << "{\"type_allowed\":" << CaseLogger::Array(typeAllowed)
+            << ",\"server_available\":" << CaseLogger::Array(serverAvailable)
+            << ",\"client_reachable\":" << CaseLogger::Array(clientReachable) << "}";
     rec.fixtureJson = fixture.str();
     rec.expectedJson = ExpectJson(row.expectOk, row.expectTransport);
-    rec.actualJson = ChoiceJson(choice);
+    rec.actualJson = DecisionJson(decision);
     rec.result = ok ? "pass" : "fail";
     if (!ok)
     {
@@ -310,15 +337,15 @@ void RunSelectionRow(CaseRecorder& recorder, const SelectionRow& row, bool soft)
     recorder.Record(rec);
 }
 
-// Deployment-readiness decision (Layer 1, no execution): POST
-// /notch/get-required-files and compute the *client-side* decision — any
-// required file with exists=false ⇒ not-ready ⇒ the client would block the run.
-// This verifies the readiness decision only. The facts are server-published
-// deployment state; the decision is user-actionable, not auto-negotiated, and is
+// Deployment-readiness decision (Layer 1, no execution): the facade's
+// GetRequiredFiles posts /notch/get-required-files; any required file with
+// exists=false ⇒ not-ready ⇒ the client would block the run. Verifies the
+// readiness decision only — server-published facts, a user-actionable decision,
 // orthogonal to transport selection.
 void RunReadinessCase(
     CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
+    cec::Client& client,
+    FacadeLog& facadeLog,
     const std::string& caseId,
     const std::string& title,
     const std::string& description,
@@ -332,34 +359,26 @@ void RunReadinessCase(
     rec.description = description;
     rec.specRef = kSpecReadiness;
 
-    ComfyExtensionClientProtocol::HttpResponse response;
-    std::string sendError;
-    if (!http.Send(ClientProtocol::BuildRequiredFilesRequest(workflowJson), response, sendError))
+    facadeLog.SetCase(caseId);
+    cec::Result<std::vector<cec::RequiredFile> > files = client.GetRequiredFiles(workflowJson);
+    if (!files)
     {
+        facadeLog.Action("get_required_files", "", "fail", files.GetError().message);
         rec.result = "error";
-        rec.actualJson = "{\"error\":" + CaseLogger::Quote(sendError) + "}";
-        rec.errors.push_back("harness_error");
-        recorder.Record(rec);
-        return;
-    }
-    std::vector<ComfyExtensionClientProtocol::RequiredFile> files;
-    std::string parseError;
-    if (!ClientProtocol::ParseRequiredFilesResponse(response.m_body, files, parseError))
-    {
-        rec.result = "error";
-        rec.actualJson = "{\"error\":" + CaseLogger::Quote(parseError) + "}";
-        rec.errors.push_back("required_files_parse_error");
+        rec.actualJson = "{\"error\":" + CaseLogger::Quote(files.GetError().message) + "}";
+        rec.errors.push_back("required_files_error");
         recorder.Record(rec);
         return;
     }
     int missing = 0;
-    for (size_t i = 0; i < files.size(); ++i)
+    for (size_t i = 0; i < files.Value().size(); ++i)
     {
-        if (!files[i].m_exists)
+        if (!files.Value()[i].exists)
         {
             ++missing;
         }
     }
+    facadeLog.Action("get_required_files", "\"missing\":" + std::to_string(missing), "ok");
     const bool ready = missing == 0;
     const bool ok = ready == expectReady;
     std::ostringstream actual;
@@ -468,11 +487,10 @@ std::string NamedRouteRelativeDirectory(const MatrixOptions& options)
     return "remote-route";
 }
 
-bool NamedRouteConfiguredForClient(const MatrixOptions& options,
-                                   const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
+bool NamedRouteConfiguredForClient(const MatrixOptions& options, const cec::ServerFacts& server)
 {
     return !options.namedRouteId.empty() && !options.namedRouteClientRoot.empty() &&
-           ContainsString(deployment.m_namedDiskRouteIds, options.namedRouteId);
+           ContainsString(server.named_disk_route_ids, options.namedRouteId);
 }
 
 // Current WSL2 GPU-PV runners can reject an otherwise well-formed CUDA IPC
@@ -493,12 +511,12 @@ bool IsWslPlatform()
            line.find("WSL") != std::string::npos;
 }
 
-std::vector<std::string> DeliveryServerTransports(const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
+std::vector<std::string> DeliveryServerTransports(const cec::ServerFacts& server)
 {
     std::vector<std::string> transports;
-    for (size_t i = 0; i < deployment.m_outputTransports.size(); ++i)
+    for (size_t i = 0; i < server.output_transports.size(); ++i)
     {
-        const std::string transport = deployment.m_outputTransports[i];
+        const std::string transport = server.output_transports[i];
         if (transport == "disk" || transport == "http" || transport == "cuda")
         {
             transports.push_back(transport);
@@ -522,13 +540,13 @@ std::vector<std::string> ClientReachableTransports(
     Phase phase,
     bool namedRouteDisk,
     const MatrixOptions& options,
-    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment)
+    const cec::ServerFacts& server)
 {
     if (phase != Phase::DeliveryRemote)
     {
         return std::vector<std::string>{"cuda", "disk", "http"};
     }
-    if (namedRouteDisk && NamedRouteConfiguredForClient(options, deployment))
+    if (namedRouteDisk && NamedRouteConfiguredForClient(options, server))
     {
         return std::vector<std::string>{"disk", "http"};
     }
@@ -646,120 +664,48 @@ std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height)
     return bytes;
 }
 
-ComfyExtensionClientProtocol::OutputTransportKind TransportKindFromName(const std::string& transport)
+struct DeliveryContext
 {
-    if (transport == "disk")
-    {
-        return ComfyExtensionClientProtocol::OutputTransportDisk;
-    }
-    if (transport == "http")
-    {
-        return ComfyExtensionClientProtocol::OutputTransportHttp;
-    }
-    if (transport == "cuda")
-    {
-        return ComfyExtensionClientProtocol::OutputTransportCuda;
-    }
-    return ComfyExtensionClientProtocol::OutputTransportUnset;
-}
-
-struct DeliveryRunState
-{
-    bool queued = false;
-    std::string promptId;
-    std::string injectError;
-    std::string terminalType;
-    bool terminalSuccess = false;
-    bool outputReady = false;
-    bool cudaStatus = false;
-    ComfyExtensionClientProtocol::OutputReady output;
-    ComfyExtensionClientProtocol::CudaShareStatus cudaShare;
-    std::vector<std::string> websocketFrames;
+    CaseRecorder& recorder;
+    cec::Client& client;
+    cec::HttpTransport& http;
+    IWebSocketProbe& ws;
+    CaseLogger& logger;
+    FacadeLog& facadeLog;
+    DeliveryEventSink& sink;
+    DeliveryRunState& state;
+    const MatrixOptions& options;
+    const cec::ServerFacts& server;
+    ICudaShareReader* cudaReader;
 };
 
-bool WaitForDeliveryEvents(
-    IWebSocketProbe& ws,
-    const std::string& promptId,
-    const std::string& consumerId,
-    const std::string& transport,
-    int timeoutMs,
-    DeliveryRunState& state)
+// Drain the live WebSocket and forward every frame to the facade
+// (Client::OnWebSocketText). The facade parses, correlates prompt -> consumer,
+// and dispatches to the DeliveryEventSink, which records the terminal lifecycle
+// event, the matching notch-output-ready, and the matching notch-cuda-share-status
+// into state. The harness owns this loop's timing because the facade is threadless.
+void WaitForDelivery(DeliveryContext& ctx, const std::string& transport, int timeoutMs)
 {
     const std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
-        std::vector<std::string> batch = ws.DrainReceived();
+        std::vector<std::string> batch = ctx.ws.DrainReceived();
         for (size_t i = 0; i < batch.size(); ++i)
         {
-            state.websocketFrames.push_back(batch[i]);
-            ComfyExtensionClientProtocol::WebSocketEvent event;
-            std::string eventError;
-            if (!ClientProtocol::ParseWebSocketEvent(batch[i], event, eventError))
-            {
-                continue;
-            }
-            if (event.m_kind == ComfyExtensionClientProtocol::EventNotchOutputReady)
-            {
-                std::vector<ComfyExtensionClientProtocol::OutputReady> outputs;
-                std::string outputError;
-                if (ClientProtocol::ParseOutputReadyEvent(batch[i], outputs, outputError))
-                {
-                    for (size_t j = 0; j < outputs.size(); ++j)
-                    {
-                        if ((outputs[j].m_promptId.empty() || outputs[j].m_promptId == promptId) &&
-                            outputs[j].m_name == consumerId &&
-                            outputs[j].m_transport == transport)
-                        {
-                            state.output = outputs[j];
-                            state.outputReady = true;
-                        }
-                    }
-                }
-            }
-            if (event.m_kind == ComfyExtensionClientProtocol::EventNotchCudaShareStatus)
-            {
-                std::vector<ComfyExtensionClientProtocol::CudaShareStatus> shares;
-                std::string cudaError;
-                if (ClientProtocol::ParseCudaShareStatusEvent(batch[i], shares, cudaError))
-                {
-                    for (size_t j = 0; j < shares.size(); ++j)
-                    {
-                        if (shares[j].m_name == consumerId)
-                        {
-                            state.cudaShare = shares[j];
-                            state.cudaStatus = true;
-                        }
-                    }
-                }
-            }
-            if (!event.m_promptId.empty() && event.m_promptId != promptId)
-            {
-                continue;
-            }
-            if (event.m_kind == ComfyExtensionClientProtocol::EventExecutionSuccess)
-            {
-                state.terminalType = "execution_success";
-                state.terminalSuccess = true;
-            }
-            else if (event.m_kind == ComfyExtensionClientProtocol::EventExecutionError ||
-                     event.m_kind == ComfyExtensionClientProtocol::EventExecutionInterrupted)
-            {
-                state.terminalType = event.m_type;
-            }
+            ctx.state.websocketFrames.push_back(batch[i]);
+            ctx.client.OnWebSocketText(batch[i]);
         }
-
-        if (state.terminalSuccess && (transport == "cuda" ? state.cudaStatus : state.outputReady))
+        if (ctx.state.terminalSuccess && (transport == "cuda" ? ctx.state.cudaStatus : ctx.state.outputReady))
         {
-            return true;
+            return;
         }
-        if (!state.terminalType.empty() && !state.terminalSuccess)
+        if (!ctx.state.terminalType.empty() && !ctx.state.terminalSuccess)
         {
-            return true;
+            return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    return false;
 }
 
 std::string WebSocketFrameLog(const std::vector<std::string>& frames)
@@ -773,45 +719,46 @@ std::string WebSocketFrameLog(const std::vector<std::string>& frames)
     return log;
 }
 
-std::string OutputReadyJson(const ComfyExtensionClientProtocol::OutputReady& output)
+std::string OutputReadyJson(const cec::OutputReady& output)
 {
     std::ostringstream json;
-    json << "{\"name\":" << CaseLogger::Quote(output.m_name)
-         << ",\"prompt_id\":" << CaseLogger::Quote(output.m_promptId)
-         << ",\"transport\":" << CaseLogger::Quote(output.m_transport)
-         << ",\"path\":" << CaseLogger::Quote(output.m_path)
-         << ",\"named_route_id\":" << CaseLogger::Quote(output.m_namedRouteId)
-         << ",\"relative_path\":" << CaseLogger::Quote(output.m_relativePath)
-         << ",\"url\":" << CaseLogger::Quote(output.m_url)
-         << ",\"type\":" << CaseLogger::Quote(output.m_type)
-         << ",\"format\":" << CaseLogger::Quote(output.m_format)
-         << ",\"width\":" << output.m_width
-         << ",\"height\":" << output.m_height << "}";
+    json << "{\"name\":" << CaseLogger::Quote(output.name)
+         << ",\"consumer_id\":" << CaseLogger::Quote(output.consumer_id)
+         << ",\"prompt_id\":" << CaseLogger::Quote(output.prompt_id)
+         << ",\"transport\":" << CaseLogger::Quote(output.transport)
+         << ",\"path\":" << CaseLogger::Quote(output.path)
+         << ",\"named_route_id\":" << CaseLogger::Quote(output.named_route_id)
+         << ",\"relative_path\":" << CaseLogger::Quote(output.relative_path)
+         << ",\"url\":" << CaseLogger::Quote(output.url)
+         << ",\"type\":" << CaseLogger::Quote(output.type)
+         << ",\"format\":" << CaseLogger::Quote(output.format)
+         << ",\"width\":" << output.width
+         << ",\"height\":" << output.height << "}";
     return json.str();
 }
 
-std::string CudaShareStatusJson(const ComfyExtensionClientProtocol::CudaShareStatus& share)
+std::string CudaShareStatusJson(const cec::CudaShareStatus& share)
 {
     std::ostringstream json;
-    json << "{\"name\":" << CaseLogger::Quote(share.m_name)
-         << ",\"width\":" << share.m_width
-         << ",\"height\":" << share.m_height
-         << ",\"channels\":" << share.m_channels
-         << ",\"pixel_format\":" << CaseLogger::Quote(share.m_pixelFormat)
-         << ",\"dtype\":" << CaseLogger::Quote(share.m_dtype)
-         << ",\"channel_order\":" << CaseLogger::Quote(share.m_channelOrder)
-         << ",\"memory_layout\":" << CaseLogger::Quote(share.m_memoryLayout)
-         << ",\"row_stride_bytes\":" << share.m_rowStrideBytes
-         << ",\"data_offset\":" << share.m_dataOffset
-         << ",\"data_size_bytes\":" << share.m_dataSizeBytes
-         << ",\"metadata_offset\":" << share.m_metadataOffset
-         << ",\"metadata_size_bytes\":" << share.m_metadataSizeBytes
-         << ",\"frame_counter_offset\":" << share.m_frameCounterOffset
-         << ",\"cuda_device_index\":" << share.m_cudaDeviceIndex
-         << ",\"notch_consumer_id\":" << CaseLogger::Quote(share.m_notchConsumerId)
-         << ",\"resource_id\":" << CaseLogger::Quote(share.m_resourceId)
-         << ",\"has_ipc_handle\":" << CaseLogger::Bool(!share.m_ipcHandleHex.empty())
-         << ",\"has_event_ipc_handle\":" << CaseLogger::Bool(!share.m_eventIpcHandleHex.empty())
+    json << "{\"name\":" << CaseLogger::Quote(share.name)
+         << ",\"width\":" << share.width
+         << ",\"height\":" << share.height
+         << ",\"channels\":" << share.channels
+         << ",\"pixel_format\":" << CaseLogger::Quote(share.pixel_format)
+         << ",\"dtype\":" << CaseLogger::Quote(share.dtype)
+         << ",\"channel_order\":" << CaseLogger::Quote(share.channel_order)
+         << ",\"memory_layout\":" << CaseLogger::Quote(share.memory_layout)
+         << ",\"row_stride_bytes\":" << share.row_stride_bytes
+         << ",\"data_offset\":" << share.data_offset
+         << ",\"data_size_bytes\":" << share.data_size_bytes
+         << ",\"metadata_offset\":" << share.metadata_offset
+         << ",\"metadata_size_bytes\":" << share.metadata_size_bytes
+         << ",\"frame_counter_offset\":" << share.frame_counter_offset
+         << ",\"cuda_device_index\":" << share.cuda_device_index
+         << ",\"notch_consumer_id\":" << CaseLogger::Quote(share.notch_consumer_id)
+         << ",\"resource_id\":" << CaseLogger::Quote(share.resource_id)
+         << ",\"has_ipc_handle\":" << CaseLogger::Bool(!share.ipc_handle_hex.empty())
+         << ",\"has_event_ipc_handle\":" << CaseLogger::Bool(!share.event_ipc_handle_hex.empty())
          << "}";
     return json.str();
 }
@@ -838,35 +785,9 @@ std::string WebSocketSummaryJson(const DeliveryRunState& state)
     return json.str();
 }
 
-void AppendPromptDiagnostics(
-    int index,
-    const std::string& caseId,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    CaseLogger& logger,
-    const std::string& promptId)
-{
-    if (promptId.empty())
-    {
-        return;
-    }
-    ComfyExtensionClientProtocol::HttpRequest diagRequest;
-    diagRequest.m_method = "GET";
-    diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
-    diagRequest.m_contentType = "application/json";
-    ComfyExtensionClientProtocol::HttpResponse diagResponse;
-    std::string diagError;
-    if (http.Send(diagRequest, diagResponse, diagError) && !diagResponse.m_body.empty())
-    {
-        logger.AppendCaseFile(index, caseId, "notch-diagnostics.json",
-                              CaseLogger::PrettyPrint(diagResponse.m_body) + "\n");
-    }
-}
-
-bool FetchPromptDiagnostics(
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    const std::string& promptId,
-    std::string& body,
-    std::string& error)
+// Diagnostics are not part of the facade contract; fetch them with a direct GET
+// for evidence/context only (spec §9b: diagnostics never gate a verdict).
+bool FetchPromptDiagnostics(cec::HttpTransport& http, const std::string& promptId, std::string& body, std::string& error)
 {
     body.clear();
     error.clear();
@@ -875,30 +796,39 @@ bool FetchPromptDiagnostics(
         error = "prompt_id is empty";
         return false;
     }
-
-    ComfyExtensionClientProtocol::HttpRequest diagRequest;
-    diagRequest.m_method = "GET";
-    diagRequest.m_path = "/notch/diagnostics?prompt_id=" + promptId;
-    diagRequest.m_contentType = "application/json";
-    ComfyExtensionClientProtocol::HttpResponse diagResponse;
+    cec::HttpRequest diag;
+    diag.method = "GET";
+    diag.path = "/notch/diagnostics?prompt_id=" + promptId;
+    diag.content_type = "application/json";
+    cec::HttpResponse response;
     std::string sendError;
-    if (!http.Send(diagRequest, diagResponse, sendError))
+    if (!http.Send(diag, response, sendError))
     {
         error = sendError.empty() ? "diagnostics request failed" : sendError;
         return false;
     }
-    body = diagResponse.m_body;
-    if (diagResponse.m_statusCode != 200)
+    body = response.body;
+    if (response.status_code != 200)
     {
-        error = "diagnostics endpoint returned HTTP " + std::to_string(diagResponse.m_statusCode);
+        error = "diagnostics endpoint returned HTTP " + std::to_string(response.status_code);
         return false;
     }
     return true;
 }
 
-std::vector<std::string> MissingDiagnosticsEvents(
-    const std::string& diagnosticsJson,
-    const std::vector<std::string>& requiredEvents)
+void AppendPromptDiagnostics(int index, const std::string& caseId, cec::HttpTransport& http, CaseLogger& logger,
+                             const std::string& promptId)
+{
+    std::string body;
+    std::string error;
+    if (FetchPromptDiagnostics(http, promptId, body, error) && !body.empty())
+    {
+        logger.AppendCaseFile(index, caseId, "notch-diagnostics.json", CaseLogger::PrettyPrint(body) + "\n");
+    }
+}
+
+std::vector<std::string> MissingDiagnosticsEvents(const std::string& diagnosticsJson,
+                                                  const std::vector<std::string>& requiredEvents)
 {
     std::vector<std::string> missing;
     for (size_t i = 0; i < requiredEvents.size(); ++i)
@@ -914,34 +844,38 @@ std::vector<std::string> MissingDiagnosticsEvents(
 void AppendDeliveryEvidence(
     int index,
     const std::string& caseId,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
+    cec::HttpTransport& http,
     CaseLogger& logger,
     const MatrixOptions& options,
+    const FacadeLog& facadeLog,
     const long logStart,
     const DeliveryRunState& state,
     const std::string& negotiationJson,
-    const std::string& injectRequestJson,
+    const std::string& injectRequestBody,
     const std::string& injectResponseJson,
     const std::string& hashesJson,
     const std::string& diagnosticsJson = "")
 {
     logger.AppendCaseFile(index, caseId, "negotiation.json", CaseLogger::PrettyPrint(negotiationJson) + "\n");
-    if (!injectRequestJson.empty())
+    if (!facadeLog.Lines().empty())
     {
-        // Multipart requests carry binary form data, not JSON. Pretty-printing
-        // binary as JSON is meaningless (and historically drove the formatter to
-        // crash); write a small summary for multipart, pretty JSON otherwise.
-        const bool looksJson = injectRequestJson[0] == '{' || injectRequestJson[0] == '[';
+        logger.AppendCaseFile(index, caseId, "facade-trace.log", facadeLog.Lines());
+    }
+    if (!injectRequestBody.empty())
+    {
+        // The facade builds the inject request; multipart bodies carry binary form
+        // data, so summarize those and pretty-print JSON bodies.
+        const bool looksJson = injectRequestBody[0] == '{' || injectRequestBody[0] == '[';
         if (looksJson)
         {
             logger.AppendCaseFile(index, caseId, "inject-request.json",
-                                  CaseLogger::PrettyPrint(injectRequestJson) + "\n");
+                                  CaseLogger::PrettyPrint(injectRequestBody) + "\n");
         }
         else
         {
             std::ostringstream note;
             note << "{\"note\":\"multipart/form-data body omitted (binary)\",\"bytes\":"
-                 << injectRequestJson.size() << "}";
+                 << injectRequestBody.size() << "}";
             logger.AppendCaseFile(index, caseId, "inject-request.json", CaseLogger::PrettyPrint(note.str()) + "\n");
         }
     }
@@ -987,14 +921,9 @@ void AppendDeliveryEvidence(
     }
 }
 
-// The on-disk output extension the server uses for a given output type. Workflow-
-// derived types carry their own format (a path's own extension, a File3D's glb);
-// transcoded types are encoded into a fixed container.
-// The server's output routes guard the consumer/output id with ^[A-Za-z0-9_-]+$
-// (resolve_output_artifact / _SAFE_ID), so the http GET 404s on any other
-// character. Generated case ids use '.' as a separator, so derive a safe
-// consumer id (dots and any other disallowed char -> '-') for output routing
-// while the dotted case id stays the human-facing record id.
+// The server's output routes guard the consumer/output id with ^[A-Za-z0-9_-]+$,
+// so derive a safe consumer id (dots and any other disallowed char -> '-') for
+// output routing while the dotted case id stays the human-facing record id.
 std::string SafeConsumerId(const std::string& caseId)
 {
     std::string out;
@@ -1023,6 +952,28 @@ std::string OutputExtensionForType(const std::string& outputType, const std::str
 // A default load3d_camera value (inline dict merged into the server's defaults).
 const char* const kCameraInlineJson = "{\"position\":[0.0,0.0,5.0],\"target\":[0.0,0.0,0.0],\"fov\":35.0}";
 
+// Build the facade OutputRequest for a transport, output type, and extension.
+cec::OutputRequest BuildOutputRequest(const std::string& transport, const std::string& outputType,
+                                      const std::string& extension, const MatrixOptions& options,
+                                      bool useNamedRouteDisk, const std::string& caseId)
+{
+    if (transport == "http")
+    {
+        return cec::OutputRequest::Http(outputType, extension);
+    }
+    if (transport == "cuda")
+    {
+        return cec::OutputRequest::Cuda(outputType);
+    }
+    // disk
+    if (useNamedRouteDisk)
+    {
+        return cec::OutputRequest::DiskNamedRoute(outputType, options.namedRouteId, extension,
+                                                  NamedRouteRelativeDirectory(options), caseId);
+    }
+    return cec::OutputRequest::DiskPath(outputType, DefaultLocalOutputPath(options), extension, caseId);
+}
+
 // Run a verifier for the type's verification class against the delivered bytes.
 // expectedBytes is the uploaded/source bytes (used by byte-exact only).
 VerifyResult RunVerifier(const DeliveryTypeContract& contract,
@@ -1048,24 +999,19 @@ VerifyResult RunVerifier(const DeliveryTypeContract& contract,
 }
 
 void RunFilePathDeliveryCase(
-    CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    IWebSocketProbe& ws,
-    CaseLogger& logger,
-    const MatrixOptions& options,
-    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
+    DeliveryContext& ctx,
     const std::string& caseId,
     const std::string& title,
     const std::string& description,
     const std::string& transport,
-    bool expectSuccess,
-    bool useNamedRouteDisk = false,
-    const DeliveryTypeContract* contractPtr = nullptr)
+    bool useNamedRouteDisk,
+    const DeliveryTypeContract* contractPtr)
 {
-    // Default to the file_path contract (the historical behavior) when none given.
     static const DeliveryTypeContract kFilePathContract{
         "file_path", "STRING", "file_path", "", false, VerificationClass::ByteExact};
     const DeliveryTypeContract& contract = contractPtr ? *contractPtr : kFilePathContract;
+    const MatrixOptions& options = ctx.options;
+
     CaseRecord rec;
     rec.caseId = caseId;
     rec.title = title;
@@ -1074,43 +1020,30 @@ void RunFilePathDeliveryCase(
     rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
     rec.requiredTransport = transport;
 
+    ctx.facadeLog.SetCase(caseId);
+    ctx.state = DeliveryRunState{};
+
     const std::vector<std::string> clientReachable =
-        ClientReachableTransports(options.phase, useNamedRouteDisk, options, deployment);
-    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
-    selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(contract);
-    selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
-    selectionOptions.m_clientReachableTransports = clientReachable;
-    selectionOptions.m_requiredTransport = transport;
-    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+        ClientReachableTransports(options.phase, useNamedRouteDisk, options, ctx.server);
+    const std::vector<std::string> typeAllowed = TypeAllowedTransports(contract);
+    const std::vector<std::string> serverAvailable = DeliveryServerTransports(ctx.server);
+    cec::OutputTransportRequest selectionRequest =
+        MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, std::vector<std::string>{}, transport);
+    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(selectionRequest);
+    ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
+                         decision.ok ? "ok" : "fail", decision.error);
 
     std::ostringstream negotiation;
-    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
-                << ",\"server_available\":" << CaseLogger::Array(selectionOptions.m_serverAvailableTransports)
-                << ",\"client_reachable\":" << CaseLogger::Array(selectionOptions.m_clientReachableTransports)
-                << ",\"server_named_route_ids\":" << CaseLogger::Array(deployment.m_namedDiskRouteIds)
+    negotiation << "{\"type_allowed\":" << CaseLogger::Array(typeAllowed)
+                << ",\"server_available\":" << CaseLogger::Array(serverAvailable)
+                << ",\"client_reachable\":" << CaseLogger::Array(clientReachable)
+                << ",\"server_named_route_ids\":" << CaseLogger::Array(ctx.server.named_disk_route_ids)
                 << ",\"named_route_id\":" << CaseLogger::Quote(useNamedRouteDisk ? options.namedRouteId : "")
                 << ",\"required_transport\":" << CaseLogger::Quote(transport)
-                << ",\"choice\":" << ChoiceJson(choice) << "}";
+                << ",\"choice\":" << DecisionJson(decision) << "}";
 
-    if (!expectSuccess)
-    {
-        const bool ok = !choice.m_ok;
-        rec.expectedJson = "{\"selected\":false}";
-        rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
-        rec.result = ok ? "pass" : "fail";
-        if (!ok)
-        {
-            rec.errors.push_back("unexpected_accept");
-        }
-        const int index = recorder.Record(rec);
-        DeliveryRunState emptyState;
-        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
-        return;
-    }
-
-    // load3d_camera is injected as an inline JSON value (no fixture file); every
-    // other type has a source file: file_path uses it as a server-staged path,
-    // the rest upload its bytes by multipart.
+    // load3d_camera is injected as inline JSON; every other type has a source
+    // file: file_path uses it as a server-staged path, the rest upload its bytes.
     const bool inlineInput = contract.outputType == "load3d_camera";
     std::string sourcePath;
     std::vector<uint8_t> sourceBytes;
@@ -1126,194 +1059,174 @@ void RunFilePathDeliveryCase(
                              ",\"error\":" + CaseLogger::Quote(fileError) + "}";
             rec.result = "error";
             rec.errors.push_back("harness_error");
-            recorder.Record(rec);
+            ctx.recorder.Record(rec);
             return;
         }
     }
 
-    if (!choice.m_ok)
+    if (!decision.ok)
     {
         rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"hash_match\":true}";
-        rec.actualJson = "{\"selected\":false,\"choice\":" + ChoiceJson(choice) + "}";
+        rec.actualJson = "{\"selected\":false,\"choice\":" + DecisionJson(decision) + "}";
         rec.result = "fail";
         rec.errors.push_back("unexpected_reject");
-        const int index = recorder.Record(rec);
-        DeliveryRunState emptyState;
-        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        const int index = ctx.recorder.Record(rec);
+        AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, -1, ctx.state,
+                               negotiation.str(), "", "", "");
         return;
     }
 
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson(contract.inputType, contract.slotName);
-    ComfyExtensionClientProtocol::WorkflowSubmissionRequest req;
-    req.m_workflowJson = workflowJson;
-    req.m_clientId = options.clientId;
-    req.m_consumerId = consumerId;
-    req.m_execute = true;
-    req.m_broadcastWs = true;
-    // Input transport per the contract: file_path passes a server-staged path
-    // string; load3d_camera passes an inline JSON dict; every other type uploads
-    // the fixture bytes by multipart so the bytes really travel client->server.
+
+    // Parse the workflow through the facade first: this caches the contract that
+    // Submit's pre-flight validation and the stateful SelectOutputTransport rely on.
+    cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
+    ctx.facadeLog.Action("parse_workflow",
+                         parsed ? ("\"inputs\":" + std::to_string(parsed.Value().inputs.size()) +
+                                   ",\"outputs\":" + std::to_string(parsed.Value().outputs.size()))
+                                : "",
+                         parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
+
+    cec::SubmitRequest submit;
+    submit.workflow_json = workflowJson;
+    submit.client_id = options.clientId;
+    submit.consumer_id = consumerId;
+    submit.execute = true;
+    submit.broadcast_ws = true;
     if (contract.outputType == "file_path")
     {
-        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::String("test_input", sourcePath, contract.inputType));
+        submit.AddInput(cec::InputValue::String("test_input", sourcePath, contract.inputType));
     }
     else if (inlineInput)
     {
-        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::Json("test_input", kCameraInlineJson, contract.inputType));
+        submit.AddInput(cec::InputValue::Json("test_input", kCameraInlineJson, contract.inputType));
     }
     else
     {
         const std::string uploadName = contract.fixtureFile.empty() ? "input.bin" : contract.fixtureFile;
-        req.m_inputs.push_back(ComfyExtensionClientProtocol::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
+        submit.AddInput(cec::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
     }
-    req.m_output.m_transport = TransportKindFromName(transport);
-    req.m_output.m_type = contract.outputType;
-    req.m_output.m_extension = OutputExtensionForType(contract.outputType, sourcePath);
-    if (transport == "disk")
-    {
-        if (useNamedRouteDisk)
-        {
-            req.m_output.m_namedRouteId = options.namedRouteId;
-            req.m_output.m_relativeDirectory = NamedRouteRelativeDirectory(options);
-        }
-        else
-        {
-            req.m_output.m_path = DefaultLocalOutputPath(options);
-        }
-        req.m_output.m_filenamePrefix = caseId;
-    }
+    submit.output = BuildOutputRequest(transport, contract.outputType,
+                                       OutputExtensionForType(contract.outputType, sourcePath), options,
+                                       useNamedRouteDisk, caseId);
 
-    std::string wsError;
-    if (!ws.Connect(options.wsTimeoutMs, wsError))
-    {
-        rec.result = "error";
-        rec.expectedJson = "{\"websocket_connected\":true}";
-        rec.actualJson = "{\"websocket_connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
-        rec.errors.push_back("websocket_timeout");
-        recorder.Record(rec);
-        return;
-    }
-
-    ComfyExtensionClientProtocol::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
-    if (!built.m_ok)
-    {
-        ws.Close();
-        rec.result = "error";
-        rec.actualJson = "{\"build_error\":" + CaseLogger::Quote(built.m_error) + "}";
-        rec.errors.push_back("harness_error");
-        recorder.Record(rec);
-        return;
-    }
+    ctx.sink.Configure("", consumerId, transport);
 
     const long logStart = FileSize(ServerLogPath(options));
-    ComfyExtensionClientProtocol::HttpResponse injectResponse;
-    std::string sendError;
-    if (!http.Send(built.m_request, injectResponse, sendError))
+    cec::Result<cec::JobHandle> job = ctx.client.Submit(submit);
+    // The facade builds and sends the inject request internally; the raw body is
+    // captured by http.jsonl and the submit step in facade-trace.log.
+    const std::string injectRequestBody;
+    ctx.facadeLog.Action("submit",
+                         job ? ("\"queued\":" + CaseLogger::Bool(job.Value().queued) + ",\"prompt_id\":" +
+                                CaseLogger::Quote(job.Value().prompt_id))
+                             : "",
+                         job ? "ok" : "fail", job ? "" : job.GetError().message);
+
+    if (!job)
     {
-        ws.Close();
+        ctx.state.injectError = job.GetError().message;
         rec.result = "error";
-        rec.actualJson = "{\"inject_error\":" + CaseLogger::Quote(sendError) + "}";
+        rec.actualJson = "{\"submit_error\":" + CaseLogger::Quote(job.GetError().message) + "}";
         rec.errors.push_back("harness_error");
-        recorder.Record(rec);
+        const int index = ctx.recorder.Record(rec);
+        AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, logStart, ctx.state,
+                               negotiation.str(), "", "", "");
         return;
     }
 
-    ComfyExtensionClientProtocol::WorkflowSubmissionResult submission;
-    std::string parseError;
-    const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
-    DeliveryRunState state;
-    state.queued = parsed && submission.m_queued;
-    state.promptId = submission.m_promptId;
-    state.injectError = submission.m_error.empty() ? parseError : submission.m_error;
+    ctx.state.queued = job.Value().queued;
+    ctx.state.promptId = job.Value().prompt_id;
+    ctx.sink.Configure(ctx.state.promptId, consumerId, transport);
 
-    if (state.queued)
+    if (ctx.state.queued)
     {
-        WaitForDeliveryEvents(ws, state.promptId, consumerId, transport, options.executeTimeoutMs, state);
+        WaitForDelivery(ctx, transport, options.executeTimeoutMs);
     }
-    ws.Close();
 
     std::vector<uint8_t> outputBytes;
     std::string outputPath;
     std::string outputError;
     bool outputRead = false;
-    int outputHttpStatus = 0;  // captured for the http transport so a 404/500 is visible in the case
-    if (state.outputReady)
+    int outputHttpStatus = 0;
+    if (ctx.state.outputReady)
     {
         if (transport == "disk")
         {
             if (useNamedRouteDisk)
             {
-                if (state.output.m_namedRouteId != options.namedRouteId)
+                if (ctx.state.output.named_route_id != options.namedRouteId)
                 {
                     outputError = "named_route_id mismatch";
                 }
-                else if (!IsSafeRelativePath(state.output.m_relativePath))
+                else if (!IsSafeRelativePath(ctx.state.output.relative_path))
                 {
                     outputError = "unsafe or empty relative_path";
                 }
                 else
                 {
-                    outputPath = JoinPath(options.namedRouteClientRoot, state.output.m_relativePath);
+                    outputPath = JoinPath(options.namedRouteClientRoot, ctx.state.output.relative_path);
                     outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
                 }
             }
             else
             {
-                outputPath = state.output.m_path;
+                outputPath = ctx.state.output.path;
                 outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
             }
         }
         else if (transport == "http")
         {
-            ComfyExtensionClientProtocol::HttpRequest getRequest;
-            getRequest.m_method = "GET";
-            getRequest.m_path = state.output.m_url;
-            ComfyExtensionClientProtocol::HttpResponse getResponse;
-            std::string getError;
-            const bool sent = http.Send(getRequest, getResponse, getError);
-            outputHttpStatus = getResponse.m_statusCode;
-            if (sent && getResponse.m_statusCode == 200)
+            // Fetch the artifact through the facade (Client::FetchOutput GETs the url).
+            cec::Result<cec::GeneratedResult> fetched = ctx.client.FetchOutput(ctx.state.output);
+            ctx.facadeLog.Action("fetch_output",
+                                 fetched ? ("\"status\":" + std::to_string(fetched.Value().status_code) +
+                                            ",\"bytes\":" + std::to_string(fetched.Value().bytes.size()))
+                                         : "",
+                                 fetched ? "ok" : "fail", fetched ? "" : fetched.GetError().message);
+            if (fetched)
             {
-                outputBytes.assign(getResponse.m_body.begin(), getResponse.m_body.end());
+                outputHttpStatus = fetched.Value().status_code;
+                outputBytes.assign(fetched.Value().bytes.begin(), fetched.Value().bytes.end());
                 outputRead = true;
-                outputPath = state.output.m_url;
-            }
-            else if (!sent)
-            {
-                outputError = getError.empty() ? "http output fetch transport error" : getError;
+                outputPath = ctx.state.output.url;
             }
             else
             {
-                outputError = "http output fetch returned HTTP " + std::to_string(getResponse.m_statusCode) +
-                              " for " + state.output.m_url;
+                outputHttpStatus = fetched.GetError().status_code;
+                outputError = fetched.GetError().message.empty() ? "http output fetch failed"
+                                                                 : fetched.GetError().message;
             }
         }
     }
 
     const std::string inputHash = sourceBytes.empty() ? "" : Sha256Bytes(sourceBytes);
     const std::string outputHash = outputRead ? Sha256Bytes(outputBytes) : "";
-    // Verify the delivered artifact by the type's verification class (byte-exact
-    // for file_path, structural for file_3d/camera, integrity for audio/video/mesh,
-    // decoded-as-integrity for image until stb lands). A clean output read is a
-    // precondition; the verifier decides the match.
     const VerifyResult verify = outputRead ? RunVerifier(contract, sourceBytes, outputBytes) : VerifyResult{};
     const bool verifyOk = outputRead && verify.ok;
-    // The named-route handoff only applies to the *disk* transport. In the
-    // remote-route-disk topology http is also usable, and an http delivery returns
-    // a url (not a {route_id, relative_path}); checking the named-route handoff on
-    // an http case would wrongly fail an otherwise-good delivery.
     const bool routeHandoffApplies = useNamedRouteDisk && transport == "disk";
     const bool namedRouteHandoffOk = !routeHandoffApplies ||
-        (state.outputReady && state.output.m_namedRouteId == options.namedRouteId &&
-         IsSafeRelativePath(state.output.m_relativePath) && state.output.m_path.empty());
+        (ctx.state.outputReady && ctx.state.output.named_route_id == options.namedRouteId &&
+         IsSafeRelativePath(ctx.state.output.relative_path) && ctx.state.output.path.empty());
+    // Facade correlation assertion: the facade resolves the owning consumer from
+    // its prompt -> consumer cache, so a delivered OutputReady carries our
+    // consumer_id even though the wire event keys on the output name.
+    const bool correlationOk = !ctx.state.outputReady || ctx.state.output.consumer_id == consumerId;
+    if (ctx.state.outputReady)
+    {
+        ctx.facadeLog.Action("assert.correlation",
+                             "\"consumer_id\":" + CaseLogger::Quote(ctx.state.output.consumer_id),
+                             correlationOk ? "ok" : "fail");
+    }
+
     std::string diagnosticsJson;
     std::string diagnosticsError;
-    const bool diagnosticsFetched = state.promptId.empty()
+    const bool diagnosticsFetched = ctx.state.promptId.empty()
         ? false
-        : FetchPromptDiagnostics(http, state.promptId, diagnosticsJson, diagnosticsError);
+        : FetchPromptDiagnostics(ctx.http, ctx.state.promptId, diagnosticsJson, diagnosticsError);
     std::vector<std::string> requiredDiagnosticsEvents;
-    if (state.queued)
+    if (ctx.state.queued)
     {
         requiredDiagnosticsEvents = {
             "inject.request_parsed",
@@ -1334,33 +1247,34 @@ void RunFilePathDeliveryCase(
             "output_node.delivery_done",
         };
     }
-    // Diagnostics are context, not a verdict gate (spec §9b: "diagnostics are
-    // context, not pass/fail"). missingDiagnostics is recorded as evidence but
-    // never fails a case.
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    const bool ok = state.queued && state.terminalSuccess && state.outputReady &&
-                    namedRouteHandoffOk && verifyOk;
-    if (!state.queued)
+    const bool ok = ctx.state.queued && ctx.state.terminalSuccess && ctx.state.outputReady &&
+                    namedRouteHandoffOk && correlationOk && verifyOk;
+    if (!ctx.state.queued)
     {
         rec.errors.push_back("unexpected_reject");
     }
-    if (state.queued && !state.terminalSuccess)
+    if (ctx.state.queued && !ctx.state.terminalSuccess)
     {
-        rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
+        rec.errors.push_back(ctx.state.terminalType.empty() ? "websocket_timeout" : "execution_error");
     }
-    if (state.terminalSuccess && !state.outputReady)
+    if (ctx.state.terminalSuccess && !ctx.state.outputReady)
     {
         rec.errors.push_back("output_event_missing");
     }
-    if (state.outputReady && !outputRead)
+    if (ctx.state.outputReady && !outputRead)
     {
         rec.errors.push_back("output_artifact_missing");
     }
-    if (state.outputReady && !namedRouteHandoffOk)
+    if (ctx.state.outputReady && !namedRouteHandoffOk)
     {
         rec.errors.push_back("named_route_handoff_mismatch");
+    }
+    if (ctx.state.outputReady && !correlationOk)
+    {
+        rec.errors.push_back("consumer_correlation_mismatch");
     }
     if (outputRead && !verify.ok && !verify.error.empty())
     {
@@ -1375,21 +1289,23 @@ void RunFilePathDeliveryCase(
            << ",\"transport\":" << CaseLogger::Quote(transport)
            << ",\"output_type\":" << CaseLogger::Quote(contract.outputType)
            << ",\"path\":" << CaseLogger::Quote(outputPath)
-           << ",\"named_route_id\":" << CaseLogger::Quote(state.output.m_namedRouteId)
-           << ",\"relative_path\":" << CaseLogger::Quote(state.output.m_relativePath)
+           << ",\"named_route_id\":" << CaseLogger::Quote(ctx.state.output.named_route_id)
+           << ",\"relative_path\":" << CaseLogger::Quote(ctx.state.output.relative_path)
            << ",\"bytes\":" << outputBytes.size()
            << ",\"sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"verification\":" << (verify.detail.empty() ? "null" : verify.detail) << "}]}";
 
     std::ostringstream actual;
-    actual << "{\"selected_transport\":" << CaseLogger::Quote(choice.m_transport)
+    actual << "{\"selected_transport\":" << CaseLogger::Quote(decision.transport)
            << ",\"output_type\":" << CaseLogger::Quote(contract.outputType)
-           << ",\"queued\":" << CaseLogger::Bool(state.queued)
-           << ",\"prompt_id\":" << CaseLogger::Quote(state.promptId)
-           << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
-           << ",\"output_ready\":" << CaseLogger::Bool(state.outputReady)
+           << ",\"queued\":" << CaseLogger::Bool(ctx.state.queued)
+           << ",\"prompt_id\":" << CaseLogger::Quote(ctx.state.promptId)
+           << ",\"terminal\":" << CaseLogger::Quote(ctx.state.terminalType)
+           << ",\"output_ready\":" << CaseLogger::Bool(ctx.state.outputReady)
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
-           << ",\"output_url\":" << CaseLogger::Quote(state.output.m_url)
+           << ",\"output_consumer_id\":" << CaseLogger::Quote(ctx.state.output.consumer_id)
+           << ",\"correlation_ok\":" << CaseLogger::Bool(correlationOk)
+           << ",\"output_url\":" << CaseLogger::Quote(ctx.state.output.url)
            << ",\"output_http_status\":" << outputHttpStatus
            << ",\"named_route_handoff_ok\":" << CaseLogger::Bool(namedRouteHandoffOk)
            << ",\"verify_ok\":" << CaseLogger::Bool(verifyOk)
@@ -1407,8 +1323,6 @@ void RunFilePathDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    // Only assert named_route_handoff_ok when it actually applies (disk delivery in
-    // the route-disk topology); listing it for http/plain-disk cases is misleading.
     std::ostringstream expected;
     expected << "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true";
     if (routeHandoffApplies)
@@ -1420,25 +1334,18 @@ void RunFilePathDeliveryCase(
     rec.actualJson = actual.str();
     rec.result = ok ? "pass" : "fail";
 
-    const int index = recorder.Record(rec);
-    AppendDeliveryEvidence(index, caseId, http, logger, options, logStart, state,
-                           negotiation.str(), built.m_request.m_body, injectResponse.m_body, hashes.str(),
-                           diagnosticsJson);
+    const int index = ctx.recorder.Record(rec);
+    AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, logStart, ctx.state,
+                           negotiation.str(), injectRequestBody, "", hashes.str(), diagnosticsJson);
 }
 
 void RunCudaDeliveryCase(
-    CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    IWebSocketProbe& ws,
-    CaseLogger& logger,
-    const MatrixOptions& options,
-    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
-    ICudaShareReader* cudaReader,
+    DeliveryContext& ctx,
     const std::string& caseId,
     const std::string& title,
-    const std::string& description,
-    bool expectSuccess)
+    const std::string& description)
 {
+    const MatrixOptions& options = ctx.options;
     CaseRecord rec;
     rec.caseId = caseId;
     rec.title = title;
@@ -1447,57 +1354,44 @@ void RunCudaDeliveryCase(
     rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
     rec.requiredTransport = "cuda";
 
+    ctx.facadeLog.SetCase(caseId);
+    ctx.state = DeliveryRunState{};
+
     const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
-    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
-    selectionOptions.m_typeAllowedTransports = std::vector<std::string>{"cuda", "disk", "http"};
-    selectionOptions.m_serverAvailableTransports = DeliveryServerTransports(deployment);
-    selectionOptions.m_clientReachableTransports = clientReachable;
-    selectionOptions.m_requiredTransport = "cuda";
-    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+    const std::vector<std::string> serverAvailable = DeliveryServerTransports(ctx.server);
+    cec::OutputTransportRequest selectionRequest =
+        MakeTransportRequest(std::vector<std::string>{"cuda", "disk", "http"}, serverAvailable, clientReachable,
+                             std::vector<std::string>{}, "cuda");
+    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(selectionRequest);
+    ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
+                         decision.ok ? "ok" : "fail", decision.error);
 
     std::ostringstream negotiation;
-    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
-                << ",\"server_available\":" << CaseLogger::Array(selectionOptions.m_serverAvailableTransports)
-                << ",\"client_reachable\":" << CaseLogger::Array(selectionOptions.m_clientReachableTransports)
+    negotiation << "{\"type_allowed\":[\"cuda\",\"disk\",\"http\"]"
+                << ",\"server_available\":" << CaseLogger::Array(serverAvailable)
+                << ",\"client_reachable\":" << CaseLogger::Array(clientReachable)
                 << ",\"required_transport\":\"cuda\""
-                << ",\"choice\":" << ChoiceJson(choice) << "}";
+                << ",\"choice\":" << DecisionJson(decision) << "}";
 
-    if (!expectSuccess)
-    {
-        const bool ok = !choice.m_ok;
-        rec.expectedJson = "{\"selected\":false}";
-        rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
-        rec.result = ok ? "pass" : "fail";
-        if (!ok)
-        {
-            rec.errors.push_back("unexpected_accept");
-        }
-        const int index = recorder.Record(rec);
-        DeliveryRunState emptyState;
-        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
-        return;
-    }
-
-    if (!choice.m_ok || !ContainsString(selectionOptions.m_serverAvailableTransports, "cuda") ||
-        deployment.m_cudaDeviceIndex < 0)
+    if (!decision.ok || !ContainsString(serverAvailable, "cuda") || ctx.server.cuda_device_index < 0)
     {
         rec.expectedJson = "{\"cuda_available\":true}";
-        rec.actualJson = "{\"cuda_available\":false,\"choice\":" + ChoiceJson(choice) + "}";
+        rec.actualJson = "{\"cuda_available\":false,\"choice\":" + DecisionJson(decision) + "}";
         rec.result = "skip";
         rec.errors.push_back("cuda_unavailable");
-        const int index = recorder.Record(rec);
-        DeliveryRunState emptyState;
-        AppendDeliveryEvidence(index, caseId, http, logger, options, -1, emptyState, negotiation.str(), "", "", "");
+        const int index = ctx.recorder.Record(rec);
+        AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, -1, ctx.state,
+                               negotiation.str(), "", "", "");
         return;
     }
 
-    if (cudaReader == nullptr)
+    if (ctx.cudaReader == nullptr)
     {
         rec.expectedJson = "{\"cuda_reader_available\":true}";
         rec.actualJson = "{\"cuda_reader_available\":false}";
         rec.result = "skip";
         rec.errors.push_back("cuda_reader_unavailable");
-        recorder.Record(rec);
+        ctx.recorder.Record(rec);
         return;
     }
 
@@ -1508,108 +1402,80 @@ void RunCudaDeliveryCase(
 
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson("IMAGE", "image");
-    ComfyExtensionClientProtocol::WorkflowSubmissionRequest req;
-    req.m_workflowJson = workflowJson;
-    req.m_clientId = options.clientId;
-    req.m_consumerId = consumerId;
-    req.m_execute = true;
-    req.m_broadcastWs = true;
-    ComfyExtensionClientProtocol::InputValue imageInput =
-        ComfyExtensionClientProtocol::InputValue::Binary("test_input", imageBytes, "cuda_input.float32rgb", "IMAGE");
-    imageInput.m_rawBuffer.m_enabled = true;
-    imageInput.m_rawBuffer.m_width = width;
-    imageInput.m_rawBuffer.m_height = height;
-    imageInput.m_rawBuffer.m_format = "float32_rgb";
-    imageInput.m_rawBuffer.m_stride = width * 3 * 4;
-    req.m_inputs.push_back(imageInput);
-    req.m_output.m_transport = ComfyExtensionClientProtocol::OutputTransportCuda;
-    req.m_output.m_type = "image";
 
-    std::string wsError;
-    if (!ws.Connect(options.wsTimeoutMs, wsError))
-    {
-        rec.result = "error";
-        rec.expectedJson = "{\"websocket_connected\":true}";
-        rec.actualJson = "{\"websocket_connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
-        rec.errors.push_back("websocket_timeout");
-        recorder.Record(rec);
-        return;
-    }
+    cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
+    ctx.facadeLog.Action("parse_workflow",
+                         parsed ? ("\"outputs\":" + std::to_string(parsed.Value().outputs.size())) : "",
+                         parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
 
-    ComfyExtensionClientProtocol::WorkflowSubmissionBuildResult built = ClientProtocol::BuildWorkflowSubmissionRequest(req);
-    if (!built.m_ok)
-    {
-        ws.Close();
-        rec.result = "error";
-        rec.actualJson = "{\"build_error\":" + CaseLogger::Quote(built.m_error) + "}";
-        rec.errors.push_back("harness_error");
-        recorder.Record(rec);
-        return;
-    }
+    cec::InputValue imageInput =
+        cec::InputValue::Binary("test_input", imageBytes, "cuda_input.float32rgb", "IMAGE");
+    imageInput.raw_buffer.enabled = true;
+    imageInput.raw_buffer.width = width;
+    imageInput.raw_buffer.height = height;
+    imageInput.raw_buffer.format = "float32_rgb";
+    imageInput.raw_buffer.stride = width * 3 * 4;
+
+    cec::SubmitRequest submit;
+    submit.workflow_json = workflowJson;
+    submit.client_id = options.clientId;
+    submit.consumer_id = consumerId;
+    submit.execute = true;
+    submit.broadcast_ws = true;
+    submit.AddInput(imageInput);
+    submit.output = cec::OutputRequest::Cuda("image");
+
+    ctx.sink.Configure("", consumerId, "cuda");
 
     const long logStart = FileSize(ServerLogPath(options));
-    ComfyExtensionClientProtocol::HttpResponse injectResponse;
-    std::string sendError;
-    if (!http.Send(built.m_request, injectResponse, sendError))
+    cec::Result<cec::JobHandle> job = ctx.client.Submit(submit);
+    ctx.facadeLog.Action("submit",
+                         job ? ("\"queued\":" + CaseLogger::Bool(job.Value().queued) + ",\"prompt_id\":" +
+                                CaseLogger::Quote(job.Value().prompt_id))
+                             : "",
+                         job ? "ok" : "fail", job ? "" : job.GetError().message);
+    if (!job)
     {
-        ws.Close();
+        ctx.state.injectError = job.GetError().message;
         rec.result = "error";
-        rec.actualJson = "{\"inject_error\":" + CaseLogger::Quote(sendError) + "}";
+        rec.actualJson = "{\"submit_error\":" + CaseLogger::Quote(job.GetError().message) + "}";
         rec.errors.push_back("harness_error");
-        recorder.Record(rec);
+        const int index = ctx.recorder.Record(rec);
+        AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, logStart, ctx.state,
+                               negotiation.str(), "", "", "");
         return;
     }
-
-    ComfyExtensionClientProtocol::WorkflowSubmissionResult submission;
-    std::string parseError;
-    const bool parsed = ClientProtocol::ParseWorkflowSubmissionResponse(injectResponse.m_body, submission, parseError);
-    DeliveryRunState state;
-    state.queued = parsed && submission.m_queued;
-    state.promptId = submission.m_promptId;
-    state.injectError = submission.m_error.empty() ? parseError : submission.m_error;
-    if (state.queued)
+    ctx.state.queued = job.Value().queued;
+    ctx.state.promptId = job.Value().prompt_id;
+    ctx.sink.Configure(ctx.state.promptId, consumerId, "cuda");
+    if (ctx.state.queued)
     {
-        WaitForDeliveryEvents(ws, state.promptId, consumerId, "cuda", options.executeTimeoutMs, state);
+        WaitForDelivery(ctx, "cuda", options.executeTimeoutMs);
     }
-    // NOTE: keep the WebSocket OPEN through the share-info GET and the IPC import.
-    // The server releases a client's CUDA output allocation on /ws disconnect
-    // (api/websocket.py _handle_ws_disconnect), so closing here would free the
-    // device allocation and make both the info endpoint 404 and the IPC handle
-    // stale (CUDA_ERROR_INVALID_HANDLE). Close only after the bytes are read.
+    // Keep the WebSocket OPEN through the share-info GET and the IPC import: the
+    // server releases a client's CUDA output allocation on /ws disconnect, so a
+    // close here would free the device allocation and make both the info endpoint
+    // 404 and the IPC handle stale. The harness owns one long-lived socket, so the
+    // allocation stays alive until RunConformance closes it.
 
-    ComfyExtensionClientProtocol::HttpRequest infoRequest;
-    infoRequest.m_method = "GET";
-    infoRequest.m_path = "/notch/cuda/share/" + consumerId;
-    ComfyExtensionClientProtocol::HttpResponse infoResponse;
+    cec::HttpRequest infoRequest;
+    infoRequest.method = "GET";
+    infoRequest.path = "/notch/cuda/share/" + consumerId;
+    cec::HttpResponse infoResponse;
     std::string infoError;
-    bool infoOk = http.Send(infoRequest, infoResponse, infoError) && infoResponse.m_statusCode == 200;
+    bool infoOk = ctx.http.Send(infoRequest, infoResponse, infoError) && infoResponse.status_code == 200;
 
-    // CUDA availability is the first skip gate. If CUDA is available, import
-    // failure is normally a real failure (e.g. a wrong/malformed handle). The
-    // only second skip is the evidenced WSL2 GPU-PV raw-IPC limitation below,
-    // after the share contract and cross-channel handle integrity have passed.
     std::string cudaAvailableError;
-    const bool cudaAvailable = cudaReader->CudaAvailable(cudaAvailableError);
+    const bool cudaAvailable = ctx.cudaReader->CudaAvailable(cudaAvailableError);
 
-    // Cross-channel handle integrity: the server publishes the IPC handle on two
-    // independent channels (the WS notch-cuda-share-status and this HTTP info
-    // endpoint, both via _alloc_to_info). The handle must be well-formed (64-byte
-    // = 128-hex) and identical across both channels. A mismatch is a real
-    // transport/serialization bug and always fails — even on WSL2.
-    const std::string wsHandleHex = state.cudaShare.m_ipcHandleHex;
-    const std::string httpHandleHex = infoOk ? ExtractJsonStringField(infoResponse.m_body, "ipc_handle") : "";
+    const std::string wsHandleHex = ctx.state.cudaShare.ipc_handle_hex;
+    const std::string httpHandleHex = infoOk ? ExtractJsonStringField(infoResponse.body, "ipc_handle") : "";
     const bool handleWellFormed = wsHandleHex.size() == 128;  // 64-byte IPC handle
     const bool handleIntegrityOk = handleWellFormed && !httpHandleHex.empty() && httpHandleHex == wsHandleHex;
 
-    // Device-index coherence: the GPU the share lives on must agree across the WS
-    // share-status, the HTTP info endpoint, and /features, and be a real device.
-    // The reader independently verifies it imported on exactly that device (it
-    // checks its own cudaSetDevice took effect). For a positive (an actual byte
-    // transfer) this proves the share and the importer are on the same device and
-    // context, not a coincidental match on a different GPU.
-    const int wsDeviceIndex = state.cudaShare.m_cudaDeviceIndex;
-    const int httpDeviceIndex = infoOk ? ExtractJsonIntField(infoResponse.m_body, "cuda_device_index", -1) : -1;
-    const int featuresDeviceIndex = deployment.m_cudaDeviceIndex;
+    const int wsDeviceIndex = ctx.state.cudaShare.cuda_device_index;
+    const int httpDeviceIndex = infoOk ? ExtractJsonIntField(infoResponse.body, "cuda_device_index", -1) : -1;
+    const int featuresDeviceIndex = ctx.server.cuda_device_index;
     const bool deviceIndexMatch =
         wsDeviceIndex >= 0 && wsDeviceIndex == httpDeviceIndex && wsDeviceIndex == featuresDeviceIndex;
 
@@ -1617,19 +1483,19 @@ void RunCudaDeliveryCase(
     const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
     std::vector<uint8_t> cudaBytes;
     std::string cudaReadError;
-    const bool cudaRead = state.cudaStatus && cudaReader->ReadShare(state.cudaShare, cudaBytes, cudaReadError);
-    ws.Close();  // allocation no longer needed; safe to disconnect (releases the share)
+    const bool cudaRead = ctx.state.cudaStatus && ctx.cudaReader->ReadShare(ctx.state.cudaShare, cudaBytes, cudaReadError);
     const std::string outputHash = cudaRead ? Sha256Bytes(cudaBytes) : "";
     const bool hashMatch = cudaRead && outputHash == expectedOutputHash;
-    const bool shapeOk = state.cudaStatus && state.cudaShare.m_width == width && state.cudaShare.m_height == height &&
-                         state.cudaShare.m_channels == 4 && state.cudaShare.m_dtype == "float32";
+    const bool shapeOk = ctx.state.cudaStatus && ctx.state.cudaShare.width == width &&
+                         ctx.state.cudaShare.height == height && ctx.state.cudaShare.channels == 4 &&
+                         ctx.state.cudaShare.dtype == "float32";
     std::string diagnosticsJson;
     std::string diagnosticsError;
-    const bool diagnosticsFetched = state.promptId.empty()
+    const bool diagnosticsFetched = ctx.state.promptId.empty()
         ? false
-        : FetchPromptDiagnostics(http, state.promptId, diagnosticsJson, diagnosticsError);
+        : FetchPromptDiagnostics(ctx.http, ctx.state.promptId, diagnosticsJson, diagnosticsError);
     std::vector<std::string> requiredDiagnosticsEvents;
-    if (state.queued)
+    if (ctx.state.queued)
     {
         requiredDiagnosticsEvents = {
             "inject.request_parsed",
@@ -1651,24 +1517,11 @@ void RunCudaDeliveryCase(
             "output_node.delivery_done",
         };
     }
-    // Diagnostics are context, not a verdict gate (spec §9b). Recorded as
-    // evidence, never failing a case.
     const std::vector<std::string> missingDiagnostics =
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
-    // Verdict:
-    //   - CUDA not available in this environment      -> skip (cuda_unavailable)
-    //   - share-status/shape/info contract broken     -> fail
-    //   - WSL platform rejects a verified share handle -> skip (cuda_ipc_unsupported)
-    //   - other available-but-failed import/read       -> fail (e.g. wrong handle)
-    //   - import ok but bytes mismatch                 -> fail (corruption)
-    //   - import ok and bytes match                    -> pass
-    // The driver error is always captured in cuda_read_error / cuda_unavailable_error.
-    // shareContractOk also requires cross-channel handle integrity: the WS-status
-    // and HTTP-info handles must agree and be well-formed. A mismatch is a real
-    // transport/serialization bug and fails regardless of platform.
-    const bool shareContractOk = state.queued && state.terminalSuccess && state.cudaStatus && shapeOk && infoOk &&
-                                 handleIntegrityOk && deviceIndexMatch;
+    const bool shareContractOk = ctx.state.queued && ctx.state.terminalSuccess && ctx.state.cudaStatus && shapeOk &&
+                                 infoOk && handleIntegrityOk && deviceIndexMatch;
     std::string result;
     if (!cudaAvailable)
     {
@@ -1677,42 +1530,36 @@ void RunCudaDeliveryCase(
     }
     else if (shareContractOk && !cudaRead && IsWslPlatform())
     {
-        // Server produced a valid, integrity-checked CUDA share with correct
-        // metadata, but this WSL-marked runner cannot import the IPC handle. The
-        // raw CUDA IPC probe records whether this is a platform limitation. Skip
-        // the byte round-trip here; the server-side share contract was already
-        // verified and this clears automatically on a runner where IPC import
-        // works.
         result = "skip";
         rec.errors.push_back("cuda_ipc_unsupported");
     }
     else
     {
-        if (!state.queued)
+        if (!ctx.state.queued)
         {
             rec.errors.push_back("unexpected_reject");
         }
-        if (state.queued && !state.terminalSuccess)
+        if (ctx.state.queued && !ctx.state.terminalSuccess)
         {
-            rec.errors.push_back(state.terminalType.empty() ? "websocket_timeout" : "execution_error");
+            rec.errors.push_back(ctx.state.terminalType.empty() ? "websocket_timeout" : "execution_error");
         }
-        if (state.terminalSuccess && !state.cudaStatus)
+        if (ctx.state.terminalSuccess && !ctx.state.cudaStatus)
         {
             rec.errors.push_back("cuda_status_missing");
         }
-        if (state.cudaStatus && !shapeOk)
+        if (ctx.state.cudaStatus && !shapeOk)
         {
             rec.errors.push_back("cuda_metadata_mismatch");
         }
-        if (state.cudaStatus && !infoOk)
+        if (ctx.state.cudaStatus && !infoOk)
         {
             rec.errors.push_back("cuda_info_unavailable");
         }
-        if (state.cudaStatus && infoOk && !handleIntegrityOk)
+        if (ctx.state.cudaStatus && infoOk && !handleIntegrityOk)
         {
             rec.errors.push_back("cuda_handle_integrity_mismatch");
         }
-        if (state.cudaStatus && infoOk && !deviceIndexMatch)
+        if (ctx.state.cudaStatus && infoOk && !deviceIndexMatch)
         {
             rec.errors.push_back("cuda_device_index_mismatch");
         }
@@ -1738,18 +1585,18 @@ void RunCudaDeliveryCase(
            << ",\"expected_sha256\":" << CaseLogger::Quote(expectedOutputHash)
            << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
            << ",\"cuda_read\":" << CaseLogger::Bool(cudaRead)
-           << ",\"width\":" << state.cudaShare.m_width
-           << ",\"height\":" << state.cudaShare.m_height
-           << ",\"channels\":" << state.cudaShare.m_channels
-           << ",\"dtype\":" << CaseLogger::Quote(state.cudaShare.m_dtype)
-           << ",\"data_size_bytes\":" << state.cudaShare.m_dataSizeBytes << "}]}";
+           << ",\"width\":" << ctx.state.cudaShare.width
+           << ",\"height\":" << ctx.state.cudaShare.height
+           << ",\"channels\":" << ctx.state.cudaShare.channels
+           << ",\"dtype\":" << CaseLogger::Quote(ctx.state.cudaShare.dtype)
+           << ",\"data_size_bytes\":" << ctx.state.cudaShare.data_size_bytes << "}]}";
 
     std::ostringstream actual;
-    actual << "{\"selected_transport\":" << CaseLogger::Quote(choice.m_transport)
-           << ",\"queued\":" << CaseLogger::Bool(state.queued)
-           << ",\"prompt_id\":" << CaseLogger::Quote(state.promptId)
-           << ",\"terminal\":" << CaseLogger::Quote(state.terminalType)
-           << ",\"cuda_status\":" << CaseLogger::Bool(state.cudaStatus)
+    actual << "{\"selected_transport\":" << CaseLogger::Quote(decision.transport)
+           << ",\"queued\":" << CaseLogger::Bool(ctx.state.queued)
+           << ",\"prompt_id\":" << CaseLogger::Quote(ctx.state.promptId)
+           << ",\"terminal\":" << CaseLogger::Quote(ctx.state.terminalType)
+           << ",\"cuda_status\":" << CaseLogger::Bool(ctx.state.cudaStatus)
            << ",\"cuda_info_get\":" << CaseLogger::Bool(infoOk)
            << ",\"handle_integrity_ok\":" << CaseLogger::Bool(handleIntegrityOk)
            << ",\"ws_http_handle_match\":" << CaseLogger::Bool(!wsHandleHex.empty() && wsHandleHex == httpHandleHex)
@@ -1761,10 +1608,10 @@ void RunCudaDeliveryCase(
            << ",\"hash_match\":" << CaseLogger::Bool(hashMatch)
            << ",\"diagnostics_fetched\":" << CaseLogger::Bool(diagnosticsFetched)
            << ",\"diagnostics_missing_events\":" << CaseLogger::Array(missingDiagnostics)
-           << ",\"width\":" << state.cudaShare.m_width
-           << ",\"height\":" << state.cudaShare.m_height
-           << ",\"channels\":" << state.cudaShare.m_channels
-           << ",\"dtype\":" << CaseLogger::Quote(state.cudaShare.m_dtype)
+           << ",\"width\":" << ctx.state.cudaShare.width
+           << ",\"height\":" << ctx.state.cudaShare.height
+           << ",\"channels\":" << ctx.state.cudaShare.channels
+           << ",\"dtype\":" << CaseLogger::Quote(ctx.state.cudaShare.dtype)
            << ",\"input_sha256\":" << CaseLogger::Quote(inputHash)
            << ",\"output_sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"expected_output_sha256\":" << CaseLogger::Quote(expectedOutputHash);
@@ -1790,13 +1637,12 @@ void RunCudaDeliveryCase(
     rec.actualJson = actual.str();
     rec.result = result;
 
-    const int index = recorder.Record(rec);
-    AppendDeliveryEvidence(index, caseId, http, logger, options, logStart, state,
-                           negotiation.str(), built.m_request.m_body, injectResponse.m_body, hashes.str(),
-                           diagnosticsJson);
-    if (infoOk && !infoResponse.m_body.empty())
+    const int index = ctx.recorder.Record(rec);
+    AppendDeliveryEvidence(index, caseId, ctx.http, ctx.logger, options, ctx.facadeLog, logStart, ctx.state,
+                           negotiation.str(), "", "", hashes.str(), diagnosticsJson);
+    if (infoOk && !infoResponse.body.empty())
     {
-        logger.AppendCaseFile(index, caseId, "cuda-share-info.json", CaseLogger::PrettyPrint(infoResponse.m_body) + "\n");
+        ctx.logger.AppendCaseFile(index, caseId, "cuda-share-info.json", CaseLogger::PrettyPrint(infoResponse.body) + "\n");
     }
 }
 
@@ -1823,50 +1669,137 @@ void WriteResultFile(const std::string& outputRoot, const std::string& phaseName
     stream << CaseLogger::PrettyPrint(json.str()) << "\n";
 }
 
-// Negotiation phase (Layer 1): discovery, readiness decision, the pure
-// transport-selection matrix, and the WS handshake check. No execution.
+// Facade-behavior assertions against the live server (spec §facade): the things
+// the suite could not catch while it bypassed the Client facade — pre-flight
+// validation of a missing required input, and contract caching feeding the
+// stateful SelectOutputTransport. Correlation is asserted inside the http deliver
+// case (a delivered OutputReady must carry the correlated consumer_id).
+void RunFacadeBehaviorCase(DeliveryContext& ctx)
+{
+    const MatrixOptions& options = ctx.options;
+    CaseRecord rec;
+    rec.caseId = "facade-behavior";
+    rec.title = "Client facade: contract caching + pre-flight validation";
+    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.description = "Drives Client::ParseWorkflow (caches the contract), then asserts the stateful "
+                      "SelectOutputTransport resolves from that cache and Submit's pre-flight blocks a missing "
+                      "required input before any inject round trip.";
+    rec.specRef = kSpecFacade;
+    ctx.facadeLog.SetCase("facade-behavior");
+
+    const std::string workflowJson = BuildRoundTripWorkflowJson("STRING", "file_path");
+    cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
+    ctx.facadeLog.Action("parse_workflow",
+                         parsed ? ("\"outputs\":" + std::to_string(parsed.Value().outputs.size())) : "",
+                         parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
+    if (!parsed || parsed.Value().outputs.empty())
+    {
+        rec.result = "error";
+        rec.actualJson = "{\"parse_ok\":false}";
+        rec.errors.push_back("parse_contract_mismatch");
+        ctx.recorder.Record(rec);
+        return;
+    }
+
+    // Caching: the stateful overload pulls type-allowed from the cached contract
+    // and server-available from the negotiated session; only the policy is ours.
+    cec::TransportPolicy policy;
+    policy.reachable_transports.push_back("http");
+    policy.reachable_transports.push_back("disk");
+    policy.preference_order.push_back("http");
+    policy.preference_order.push_back("disk");
+    const std::string outputName = parsed.Value().outputs[0].name;
+    cec::OutputTransportDecision cached = ctx.client.SelectOutputTransport(workflowJson, outputName, policy);
+    ctx.facadeLog.Action("select_output_transport.cached",
+                         "\"output\":" + CaseLogger::Quote(outputName) + ",\"transport\":" +
+                             CaseLogger::Quote(cached.transport),
+                         cached.ok ? "ok" : "fail", cached.error);
+    const bool cachingOk = cached.ok && !cached.usable_transports.empty();
+
+    // Pre-flight validation: omit the required input; Submit must fail client-side
+    // with the missing-input list, before any HTTP inject.
+    cec::SubmitRequest missing;
+    missing.workflow_json = workflowJson;
+    missing.client_id = options.clientId;
+    missing.consumer_id = "facade-behavior";
+    missing.execute = false;
+    missing.output = cec::OutputRequest::Http("file_path", "bin");
+    cec::Result<cec::JobHandle> blocked = ctx.client.Submit(missing);
+    const bool preflightOk = !blocked && !blocked.GetError().missing_required_inputs.empty();
+    ctx.facadeLog.Action("submit.preflight",
+                         "\"missing\":" + CaseLogger::Array(blocked.GetError().missing_required_inputs),
+                         preflightOk ? "ok" : "fail", blocked ? "submit unexpectedly accepted" : "");
+
+    const bool ok = cachingOk && preflightOk;
+    std::ostringstream actual;
+    actual << "{\"caching_ok\":" << CaseLogger::Bool(cachingOk)
+           << ",\"cached_usable\":" << CaseLogger::Array(cached.usable_transports)
+           << ",\"preflight_blocked\":" << CaseLogger::Bool(!blocked)
+           << ",\"missing_required_inputs\":" << CaseLogger::Array(blocked.GetError().missing_required_inputs) << "}";
+    rec.expectedJson = "{\"caching_ok\":true,\"preflight_blocked\":true}";
+    rec.actualJson = actual.str();
+    rec.result = ok ? "pass" : "fail";
+    if (!cachingOk)
+    {
+        rec.errors.push_back("contract_cache_select_failed");
+    }
+    if (!preflightOk)
+    {
+        rec.errors.push_back("preflight_validation_missing");
+    }
+    const int index = ctx.recorder.Record(rec);
+    if (!ctx.facadeLog.Lines().empty())
+    {
+        ctx.logger.AppendCaseFile(index, "facade-behavior", "facade-trace.log", ctx.facadeLog.Lines());
+    }
+}
+
+// Negotiation phase (Layer 1): discovery, compatibility, readiness decision, the
+// transport-selection matrix (driven through the facade), and the WS handshake.
 void RunNegotiationCases(
     CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
+    cec::Client& client,
     IWebSocketProbe& ws,
+    FacadeLog& facadeLog,
     const MatrixOptions& options,
-    const ComfyExtensionClientProtocol::ServerCompatibilityFacts& serverCompat)
+    const cec::ServerFacts& server,
+    const cec::Result<cec::Session>& session,
+    bool wsConnected)
 {
-    // 3. Server/plugin protocol compatibility.
-    ComfyExtensionClientProtocol::CompatibilityCheckResult compat = ClientProtocol::CheckServerCompatibility(serverCompat);
+    // 3. Server/plugin protocol compatibility, from the facade handshake.
     {
+        const bool ok = static_cast<bool>(session);
         std::ostringstream actual;
-        actual << "{\"ok\":" << CaseLogger::Bool(compat.m_ok)
-               << ",\"client_too_old\":" << CaseLogger::Bool(compat.m_clientTooOld)
-               << ",\"server_too_old\":" << CaseLogger::Bool(compat.m_serverTooOld)
-               << ",\"error\":" << CaseLogger::Quote(compat.m_error)
-               << ",\"server_protocol_version\":" << CaseLogger::Quote(serverCompat.m_protocolVersion)
-               << ",\"server_supports_protocol\":" << CaseLogger::Quote(serverCompat.m_supportedProtocolRange)
+        actual << "{\"ok\":" << CaseLogger::Bool(ok)
+               << ",\"error\":" << CaseLogger::Quote(ok ? "" : session.GetError().message)
+               << ",\"server_protocol_version\":" << CaseLogger::Quote(server.protocol_version.ToString())
+               << ",\"server_supports_protocol\":" << CaseLogger::Quote(server.supports_protocol.ToString())
                << "}";
         CaseRecord rec;
         rec.caseId = "server-protocol-compatibility";
         rec.title = "Plugin/server protocol range is compatible with the C++ client";
         rec.phase = "liveness";
-        rec.description = "CheckServerCompatibility over live /features facts: the C++ client and plugin/server protocol ranges intersect.";
+        rec.description = "Client::Connect() gates on protocol compatibility over live /features facts: the C++ "
+                          "client and plugin/server protocol ranges intersect.";
         rec.specRef = kSpecLiveness;
         rec.expectedJson = "{\"ok\":true}";
         rec.actualJson = actual.str();
-        rec.result = compat.m_ok ? "pass" : "fail";
-        if (!compat.m_ok)
+        rec.result = ok ? "pass" : "fail";
+        if (!ok)
         {
             rec.errors.push_back("server_feature_mismatch");
         }
         recorder.Record(rec);
     }
 
-    // 4. Live /notch/parse type-axis assertions, when a workflow fixture exists.
+    // 4. Live type-axis assertions via Client::ParseWorkflow, when a fixture exists.
     if (options.parseWorkflowJson.empty())
     {
         CaseRecord rec;
         rec.caseId = "parse-type-axis";
         rec.title = "Type-axis discovery skipped (no parse workflow fixture)";
         rec.phase = "discovery";
-        rec.description = "No /notch/parse workflow fixture was supplied, so the output type->transport axis was not exercised live.";
+        rec.description = "No parse workflow fixture was supplied, so the output type->transport axis was not exercised live.";
         rec.specRef = kSpecTypeAxis;
         rec.actualJson = "{\"reason\":\"no_parse_workflow\"}";
         rec.result = "skip";
@@ -1874,66 +1807,51 @@ void RunNegotiationCases(
     }
     else
     {
-        ComfyExtensionClientProtocol::HttpResponse parseResponse;
-        std::string sendError;
-        if (!http.Send(ClientProtocol::BuildWorkflowDiscoveryRequest(options.parseWorkflowJson), parseResponse, sendError))
+        facadeLog.SetCase("parse-type-axis");
+        cec::Result<cec::WorkflowContract> contract = client.ParseWorkflow(options.parseWorkflowJson);
+        facadeLog.Action("parse_workflow",
+                         contract ? ("\"outputs\":" + std::to_string(contract.Value().outputs.size())) : "",
+                         contract ? "ok" : "fail", contract ? "" : contract.GetError().message);
+        if (!contract)
         {
             CaseRecord rec;
             rec.caseId = "parse-type-axis";
-            rec.title = "Type-axis discovery failed: /notch/parse request error";
+            rec.title = "Type-axis discovery failed: /notch/parse did not parse";
             rec.phase = "discovery";
-            rec.description = "The HTTP transport could not deliver the /notch/parse request.";
+            rec.description = "Client::ParseWorkflow could not produce a contract from the /notch/parse response.";
             rec.specRef = kSpecTypeAxis;
-            rec.actualJson = "{\"error\":" + CaseLogger::Quote(sendError) + "}";
+            rec.actualJson = "{\"error\":" + CaseLogger::Quote(contract.GetError().message) + "}";
             rec.result = "error";
-            rec.errors.push_back("harness_error");
+            rec.errors.push_back("parse_contract_mismatch");
             recorder.Record(rec);
         }
         else
         {
-            ComfyExtensionClientProtocol::WorkflowContract contract;
-            std::string contractError;
-            if (!ClientProtocol::ParseWorkflowContract(parseResponse.m_body, contract, contractError))
+            for (size_t i = 0; i < contract.Value().outputs.size(); ++i)
             {
-                CaseRecord rec;
-                rec.caseId = "parse-type-axis";
-                rec.title = "Type-axis discovery failed: /notch/parse contract did not parse";
-                rec.phase = "discovery";
-                rec.description = "The /notch/parse response could not be parsed into a workflow contract.";
-                rec.specRef = kSpecTypeAxis;
-                rec.actualJson = "{\"error\":" + CaseLogger::Quote(contractError) + "}";
-                rec.result = "error";
-                rec.errors.push_back("parse_contract_mismatch");
-                recorder.Record(rec);
-            }
-            else
-            {
-                for (size_t i = 0; i < contract.m_outputs.size(); ++i)
-                {
-                    const ComfyExtensionClientProtocol::ContractOutput& output = contract.m_outputs[i];
-                    std::vector<std::string> expected = ExpectedTypeTransports(output.m_type);
-                    bool ok = Sorted(expected) == Sorted(output.m_transports);
+                const cec::WorkflowOutput& output = contract.Value().outputs[i];
+                std::vector<std::string> expected = ExpectedTypeTransports(output.type);
+                bool ok = Sorted(expected) == Sorted(output.transports);
 
-                    CaseRecord rec;
-                    rec.caseId = "parse-output-" + output.m_name;
-                    rec.title = "Output '" + output.m_name + "' (" + output.m_type + ") reports its type-allowed transports";
-                    rec.phase = "discovery";
-                    rec.description = "/notch/parse must report the type->transport set for this connected output (the type-allowed axis, from OUTPUT_TYPES_BY_TRANSPORT).";
-                    rec.specRef = kSpecTypeAxis;
-                    rec.expectedJson = "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(expected) + "}";
-                    rec.actualJson = "{\"type\":" + CaseLogger::Quote(output.m_type) + ",\"transports\":" + CaseLogger::Array(output.m_transports) + "}";
-                    rec.result = ok ? "pass" : "fail";
-                    if (!ok)
-                    {
-                        rec.errors.push_back("parse_contract_mismatch");
-                    }
-                    recorder.Record(rec);
+                CaseRecord rec;
+                rec.caseId = "parse-output-" + output.name;
+                rec.title = "Output '" + output.name + "' (" + output.type + ") reports its type-allowed transports";
+                rec.phase = "discovery";
+                rec.description = "/notch/parse must report the type->transport set for this connected output.";
+                rec.specRef = kSpecTypeAxis;
+                rec.expectedJson = "{\"type\":" + CaseLogger::Quote(output.type) + ",\"transports\":" + CaseLogger::Array(expected) + "}";
+                rec.actualJson = "{\"type\":" + CaseLogger::Quote(output.type) + ",\"transports\":" + CaseLogger::Array(output.transports) + "}";
+                rec.result = ok ? "pass" : "fail";
+                if (!ok)
+                {
+                    rec.errors.push_back("parse_contract_mismatch");
                 }
+                recorder.Record(rec);
             }
         }
     }
 
-    // 4b. Deployment-readiness gate (required input files reachable on server).
+    // 4b. Deployment-readiness gate via Client::GetRequiredFiles.
     if (options.requiredFilesReadyJson.empty() && options.requiredFilesMissingJson.empty())
     {
         CaseRecord rec;
@@ -1950,56 +1868,55 @@ void RunNegotiationCases(
     {
         if (!options.requiredFilesReadyJson.empty())
         {
-            RunReadinessCase(recorder, http, "deployment-ready",
+            RunReadinessCase(recorder, client, facadeLog, "deployment-ready",
                 "All required input files present -> ready",
                 "Every file-backed input the workflow references exists on the server, so the run is ready.",
                 options.requiredFilesReadyJson, true);
         }
         if (!options.requiredFilesMissingJson.empty())
         {
-            RunReadinessCase(recorder, http, "deployment-missing-file",
+            RunReadinessCase(recorder, client, facadeLog, "deployment-missing-file",
                 "A required input file is missing -> not ready (client would block)",
                 "The workflow references a file the server does not have; the readiness decision is not-ready and the client would block the run.",
                 options.requiredFilesMissingJson, false);
         }
     }
 
-    // 5. Pure transport-selection matrix (deterministic, no server).
+    // 5. Transport-selection matrix, driven through Client::SelectOutputTransport.
     for (const SelectionRow& row : kHardRows)
     {
-        RunSelectionRow(recorder, row, /*soft=*/false);
+        RunSelectionRow(recorder, client, facadeLog, row, /*soft=*/false);
     }
     for (const SelectionRow& row : kSoftRows)
     {
-        RunSelectionRow(recorder, row, /*soft=*/true);
+        RunSelectionRow(recorder, client, facadeLog, row, /*soft=*/true);
     }
 
-    // 6. WebSocket handshake check: connect, send the feature-flags message,
-    //    drain any catch-up frames. Proves the transport is not dead code.
+    // 6. WebSocket handshake: the harness connected the socket and Client::Connect
+    //    announced the feature flags on it. Re-announce via the facade and drain.
     {
-        std::string wsError;
-        if (!ws.Connect(options.wsTimeoutMs, wsError))
+        if (!wsConnected)
         {
             CaseRecord rec;
             rec.caseId = "ws-handshake";
             rec.title = "WebSocket /ws handshake + catch-up frames";
             rec.phase = "liveness";
-            rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames. Proves the WebSocket transport works end to end.";
+            rec.description = "Connect to /ws, send the feature-flags message, and drain catch-up frames.";
             rec.specRef = kSpecLiveness;
             rec.expectedJson = "{\"connected\":true,\"sent\":true}";
-            rec.actualJson = "{\"connected\":false,\"error\":" + CaseLogger::Quote(wsError) + "}";
+            rec.actualJson = "{\"connected\":false}";
             rec.result = "fail";
             rec.errors.push_back("websocket_timeout");
             recorder.Record(rec);
         }
         else
         {
-            std::string sendError;
-            bool sent = ws.SendText(ClientProtocol::BuildFeatureFlagsMessage(), sendError);
+            facadeLog.SetCase("ws-handshake");
+            cec::Result<bool> sent = client.SendFeatureFlags();
+            facadeLog.Action("send_feature_flags", "", sent ? "ok" : "fail", sent ? "" : sent.GetError().message);
             std::vector<std::string> frames = ws.DrainReceived();
-            ws.Close();
             std::ostringstream actual;
-            actual << "{\"connected\":true,\"sent\":" << CaseLogger::Bool(sent)
+            actual << "{\"connected\":true,\"sent\":" << CaseLogger::Bool(static_cast<bool>(sent))
                    << ",\"received_frames\":" << frames.size() << "}";
             CaseRecord rec;
             rec.caseId = "ws-handshake";
@@ -2012,7 +1929,7 @@ void RunNegotiationCases(
             rec.result = sent ? "pass" : "fail";
             if (!sent)
             {
-                rec.errors.push_back("websocket_timeout");
+                rec.errors.push_back("websocket_send_failed");
             }
             recorder.Record(rec);
         }
@@ -2036,151 +1953,119 @@ std::string DeliveryCaseTitle(const DeliveryCaseDescriptor& d)
     return d.outputType + " over " + d.transport + " rejected by " + RejectAxisName(d.verdict) + " (" + d.topology + ")";
 }
 
-// A reject case is pure client-side negotiation: the client computes usable =
-// type-allowed n server-available n client-reachable and must refuse the
-// requested transport before any inject (no silent downgrade). This is the real
-// SelectOutputTransport with the type's actual type-allowed set.
+// A reject case is pure client-side negotiation through the facade: the client
+// computes usable = type-allowed n server-available n client-reachable and must
+// refuse the requested transport before any inject (no silent downgrade).
 void RunRejectCase(
-    CaseRecorder& recorder,
-    CaseLogger& logger,
-    const MatrixOptions& options,
+    DeliveryContext& ctx,
     const DeliveryCaseDescriptor& descriptor,
     const std::vector<std::string>& serverAvailable,
     const std::vector<std::string>& clientReachable)
 {
-    ComfyExtensionClientProtocol::OutputTransportOptions selectionOptions;
-    selectionOptions.m_typeAllowedTransports = TypeAllowedTransports(*descriptor.type);
-    selectionOptions.m_serverAvailableTransports = serverAvailable;
-    selectionOptions.m_clientReachableTransports = clientReachable;
-    selectionOptions.m_requiredTransport = descriptor.transport;
-    ComfyExtensionClientProtocol::OutputTransportChoice choice = ClientProtocol::SelectOutputTransport(selectionOptions);
+    const std::vector<std::string> typeAllowed = TypeAllowedTransports(*descriptor.type);
+    cec::OutputTransportRequest request =
+        MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, std::vector<std::string>{},
+                             descriptor.transport);
+    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(request);
+    ctx.facadeLog.SetCase(descriptor.id);
+    ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
+                         decision.ok ? "ok" : "fail", decision.error);
 
-    const bool ok = !choice.m_ok;
+    const bool ok = !decision.ok;
     CaseRecord rec;
     rec.caseId = descriptor.id;
     rec.title = DeliveryCaseTitle(descriptor);
-    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.phase = ctx.options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
     rec.description = "The " + descriptor.outputType + " output is not deliverable over " + descriptor.transport +
                       " in the " + descriptor.topology + " topology (excluded by " +
                       RejectAxisName(descriptor.verdict) +
                       "), so the client must refuse the hard request before inject — no silent downgrade.";
-    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.specRef = ctx.options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
     rec.requiredTransport = descriptor.transport;
     rec.expectedJson = "{\"selected\":false,\"reject_axis\":\"" + RejectAxisName(descriptor.verdict) + "\"}";
-    rec.actualJson = "{\"selected\":" + CaseLogger::Bool(choice.m_ok) + ",\"choice\":" + ChoiceJson(choice) + "}";
+    rec.actualJson = "{\"selected\":" + CaseLogger::Bool(decision.ok) + ",\"choice\":" + DecisionJson(decision) + "}";
     rec.result = ok ? "pass" : "fail";
     if (!ok)
     {
         rec.errors.push_back("unexpected_accept");
     }
-    const int index = recorder.Record(rec);
+    const int index = ctx.recorder.Record(rec);
     std::ostringstream negotiation;
-    negotiation << "{\"type_allowed\":" << CaseLogger::Array(selectionOptions.m_typeAllowedTransports)
+    negotiation << "{\"type_allowed\":" << CaseLogger::Array(typeAllowed)
                 << ",\"server_available\":" << CaseLogger::Array(serverAvailable)
                 << ",\"client_reachable\":" << CaseLogger::Array(clientReachable)
                 << ",\"required_transport\":" << CaseLogger::Quote(descriptor.transport)
-                << ",\"choice\":" << ChoiceJson(choice) << "}";
-    logger.AppendCaseFile(index, descriptor.id, "negotiation.json", CaseLogger::PrettyPrint(negotiation.str()) + "\n");
+                << ",\"choice\":" << DecisionJson(decision) << "}";
+    ctx.logger.AppendCaseFile(index, descriptor.id, "negotiation.json", CaseLogger::PrettyPrint(negotiation.str()) + "\n");
 }
 
-// Emit a self-clearing skip for a generated case (used when a whole topology is
-// capability-gated off, e.g. remote-route-disk before the server advertises the
-// named route).
-void RunSkipCase(
-    CaseRecorder& recorder,
-    const MatrixOptions& options,
-    const DeliveryCaseDescriptor& descriptor,
-    const std::string& reason)
+void RunSkipCase(DeliveryContext& ctx, const DeliveryCaseDescriptor& descriptor, const std::string& reason)
 {
     CaseRecord rec;
     rec.caseId = descriptor.id;
     rec.title = DeliveryCaseTitle(descriptor);
-    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
+    rec.phase = ctx.options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
     rec.description = "Skipped: " + reason + ". The case is generated and tracked; it self-clears when the capability is present.";
-    rec.specRef = options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
+    rec.specRef = ctx.options.phase == Phase::DeliveryRemote ? kSpecDeliveryRemote : kSpecDeliveryLocal;
     rec.requiredTransport = descriptor.transport;
     rec.actualJson = "{\"reason\":" + CaseLogger::Quote(reason) + "}";
     rec.result = "skip";
     rec.errors.push_back(reason);
-    recorder.Record(rec);
+    ctx.recorder.Record(rec);
 }
 
-// Run every generated case for one topology: deliver cases execute a real round
-// trip (cuda via the share reader, disk/http via the typed artifact runner);
-// reject cases assert client-side refusal. When skipReason is set the whole
-// topology is emitted as self-clearing skips instead.
-void RunTopologyCases(
-    CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    IWebSocketProbe& ws,
-    CaseLogger& logger,
-    const MatrixOptions& options,
-    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
-    ICudaShareReader* cudaReader,
-    const TopologyConfig& topology,
-    bool useNamedRouteDisk,
-    const std::string& skipReason)
+void RunTopologyCases(DeliveryContext& ctx, const TopologyConfig& topology, bool useNamedRouteDisk,
+                      const std::string& skipReason)
 {
     for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
     {
         if (!skipReason.empty())
         {
-            RunSkipCase(recorder, options, descriptor, skipReason);
+            RunSkipCase(ctx, descriptor, skipReason);
             continue;
         }
         if (descriptor.verdict != "deliver")
         {
-            RunRejectCase(recorder, logger, options, descriptor, topology.serverAvailable, topology.clientReachable);
+            RunRejectCase(ctx, descriptor, topology.serverAvailable, topology.clientReachable);
             continue;
         }
         if (descriptor.transport == "cuda")
         {
-            RunCudaDeliveryCase(recorder, http, ws, logger, options, deployment, cudaReader, descriptor.id,
-                                DeliveryCaseTitle(descriptor),
+            RunCudaDeliveryCase(ctx, descriptor.id, DeliveryCaseTitle(descriptor),
                                 "Inject an image, execute, deliver over CUDA, and verify the share contract and "
-                                "(where IPC is supported) the imported bytes.",
-                                true);
+                                "(where IPC is supported) the imported bytes.");
             continue;
         }
-        RunFilePathDeliveryCase(recorder, http, ws, logger, options, deployment, descriptor.id,
-                                DeliveryCaseTitle(descriptor),
+        RunFilePathDeliveryCase(ctx, descriptor.id, DeliveryCaseTitle(descriptor),
                                 "Inject the " + descriptor.outputType + " input, execute, deliver over " +
                                     descriptor.transport + ", retrieve the artifact, and verify it by its class.",
-                                descriptor.transport, true, useNamedRouteDisk, descriptor.type);
+                                descriptor.transport, useNamedRouteDisk, descriptor.type);
     }
 }
 
-void RunDeliveryCases(
-    CaseRecorder& recorder,
-    ComfyExtensionClientProtocol::IHttpTransport& http,
-    IWebSocketProbe& ws,
-    const MatrixOptions& options,
-    CaseLogger& logger,
-    const ComfyExtensionClientProtocol::ServerDeploymentFacts& deployment,
-    ICudaShareReader* cudaReader)
+void RunDeliveryCases(DeliveryContext& ctx)
 {
-    const std::vector<std::string> server = DeliveryServerTransports(deployment);
+    const std::vector<std::string> server = DeliveryServerTransports(ctx.server);
 
-    if (options.phase == Phase::DeliveryLocal)
+    // Facade-behavior assertions run once per delivery phase (caching + pre-flight).
+    RunFacadeBehaviorCase(ctx);
+
+    if (ctx.options.phase == Phase::DeliveryLocal)
     {
-        // local: client and server share host (cuda + disk + http reachable).
         const TopologyConfig local{"local", server, std::vector<std::string>{"cuda", "disk", "http"}};
-        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, local, false, "");
+        RunTopologyCases(ctx, local, false, "");
         return;
     }
 
-    if (options.phase == Phase::DeliveryRemote)
+    if (ctx.options.phase == Phase::DeliveryRemote)
     {
-        // remote-http: two containers, network only — the client reaches http only.
         const TopologyConfig remoteHttp{"remote-http", server, std::vector<std::string>{"http"}};
-        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, remoteHttp, false, "");
+        RunTopologyCases(ctx, remoteHttp, false, "");
 
-        // remote-route-disk: a shared named-route volume adds disk reachability.
-        // Self-clearing skip until the server advertises the route id in /features.
         const TopologyConfig routeDisk{"remote-route-disk", server, std::vector<std::string>{"disk", "http"}};
         const std::string routeSkip =
-            NamedRouteConfiguredForClient(options, deployment) ? "" : "named_route_unsupported";
-        RunTopologyCases(recorder, http, ws, logger, options, deployment, cudaReader, routeDisk, true, routeSkip);
+            NamedRouteConfiguredForClient(ctx.options, ctx.server) ? "" : "named_route_unsupported";
+        RunTopologyCases(ctx, routeDisk, true, routeSkip);
     }
 }
 
@@ -2195,10 +2080,15 @@ const char* PhaseName(Phase phase)
     return "negotiation";
 }
 
+std::string JoinCsv(const std::vector<std::string>& values)
+{
+    return CaseLogger::Array(values);
+}
+
 } // namespace
 
 MatrixSummary RunConformance(
-    ComfyExtensionClientProtocol::IHttpTransport& http,
+    cec::HttpTransport& http,
     IWebSocketProbe& ws,
     const MatrixOptions& options,
     CaseLogger& logger,
@@ -2206,69 +2096,90 @@ MatrixSummary RunConformance(
 {
     MatrixSummary summary;
     CaseRecorder recorder(logger, summary);
+    FacadeLog facadeLog(logger, PhaseName(options.phase));
 
-    // 1. Record the linked-against C++ client facts. A protocol range that
-    //    disagrees with the checked-out extension is then diagnosable offline.
-    ComfyExtensionClientProtocol::ClientCompatibilityFacts clientFacts = ClientProtocol::GetClientCompatibilityFacts();
+    DeliveryRunState liveState;
+    DeliveryEventSink sink(liveState, facadeLog);
+
+    cec::ClientOptions clientOptions;
+    clientOptions.client_id = options.clientId;
+    clientOptions.http_transport = &http;
+    clientOptions.web_socket_transport = &ws;
+    clientOptions.event_sink = &sink;
+    cec::Client client(clientOptions);
+
+    // 1. Record the linked-against C++ client facts.
+    cec::CppClientFacts clientFacts = cec::Client::facts();
     {
         std::ostringstream json;
         json << "{\"record\":\"cpp_client_compatibility_facts\""
-             << ",\"cpp_client_version\":" << CaseLogger::Quote(clientFacts.m_cppClientVersion)
-             << ",\"cpp_api_version\":" << CaseLogger::Quote(clientFacts.m_cppApiVersion)
-             << ",\"protocol_version\":" << CaseLogger::Quote(clientFacts.m_protocolVersion)
-             << ",\"supports_protocol\":" << CaseLogger::Quote(clientFacts.m_supportedProtocolRange)
-             << ",\"capabilities\":" << CaseLogger::Array(clientFacts.m_capabilities)
-             << ",\"handled_notch_websocket_events\":" << CaseLogger::Array(clientFacts.m_handledNotchWebSocketEvents)
-             << ",\"source_git_commit\":" << CaseLogger::Quote(clientFacts.m_sourceGitCommit)
-             << ",\"source_git_tag\":" << CaseLogger::Quote(clientFacts.m_sourceGitTag) << "}";
+             << ",\"cpp_client_version\":" << CaseLogger::Quote(clientFacts.cpp_client_version.ToString())
+             << ",\"cpp_api_version\":" << CaseLogger::Quote(clientFacts.cpp_api_version.ToString())
+             << ",\"protocol_version\":" << CaseLogger::Quote(clientFacts.protocol_version.ToString())
+             << ",\"supports_protocol\":" << CaseLogger::Quote(clientFacts.supports_protocol.ToString())
+             << ",\"capabilities\":" << JoinCsv(clientFacts.capabilities.values)
+             << ",\"handled_notch_websocket_events\":" << JoinCsv(clientFacts.handled_notch_websocket_events)
+             << ",\"source_git_commit\":" << CaseLogger::Quote(clientFacts.source_git_commit)
+             << ",\"source_git_tag\":" << CaseLogger::Quote(clientFacts.source_git_tag) << "}";
         logger.Event(json.str());
     }
 
-    // 2. Shared setup: live GET /features must be reachable and parseable.
-    ComfyExtensionClientProtocol::HttpResponse featuresResponse;
-    std::string transportError;
-    if (!http.Send(ClientProtocol::BuildServerFeaturesRequest(), featuresResponse, transportError))
+    // 2. Shared setup: discover server facts via the facade (live GET /features).
+    cec::Result<cec::ServerFacts> discovered = client.Discover();
+    facadeLog.Action("discover", discovered ? "" : "", discovered ? "ok" : "fail",
+                     discovered ? "" : discovered.GetError().message);
+    if (!discovered)
     {
         summary.setupFailureCode = "harness_error";
-        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_request\",\"error\":" + CaseLogger::Quote(transportError) + "}");
+        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"discover\",\"error\":" +
+                     CaseLogger::Quote(discovered.GetError().message) + "}");
         WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
         return summary;
     }
-
-    ComfyExtensionClientProtocol::ServerCompatibilityFacts serverCompat;
-    ComfyExtensionClientProtocol::ServerDeploymentFacts deployment;
-    std::string parseError;
-    if (!ClientProtocol::ParseServerCompatibilityFacts(featuresResponse.m_body, serverCompat, parseError) ||
-        !ClientProtocol::ParseServerDeploymentFacts(featuresResponse.m_body, deployment, parseError))
-    {
-        summary.setupFailureCode = "harness_error";
-        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"features_parse\",\"error\":" + CaseLogger::Quote(parseError) + "}");
-        WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
-        return summary;
-    }
+    const cec::ServerFacts server = discovered.Value();
     {
         std::ostringstream json;
         json << "{\"record\":\"plugin_server_facts\""
-             << ",\"plugin_version\":" << CaseLogger::Quote(serverCompat.m_pluginVersion)
-             << ",\"protocol_version\":" << CaseLogger::Quote(serverCompat.m_protocolVersion)
-             << ",\"supports_protocol\":" << CaseLogger::Quote(serverCompat.m_supportedProtocolRange)
-             << ",\"minimum_client_protocol\":" << CaseLogger::Quote(serverCompat.m_minimumClientProtocol)
-             << ",\"plugin_capabilities\":" << CaseLogger::Array(serverCompat.m_pluginCapabilities)
-             << ",\"tested_comfyui_refs\":" << CaseLogger::Array(serverCompat.m_testedComfyUiRefs)
-             << ",\"output_transports\":" << CaseLogger::Array(deployment.m_outputTransports)
-             << ",\"cuda_device_index\":" << deployment.m_cudaDeviceIndex << "}";
+             << ",\"plugin_version\":" << CaseLogger::Quote(server.plugin_version.ToString())
+             << ",\"protocol_version\":" << CaseLogger::Quote(server.protocol_version.ToString())
+             << ",\"supports_protocol\":" << CaseLogger::Quote(server.supports_protocol.ToString())
+             << ",\"minimum_client_protocol\":" << CaseLogger::Quote(server.minimum_client_protocol.ToString())
+             << ",\"plugin_capabilities\":" << JoinCsv(server.capabilities.values)
+             << ",\"tested_comfyui_refs\":" << JoinCsv(server.tested_comfyui_refs)
+             << ",\"output_transports\":" << JoinCsv(server.output_transports)
+             << ",\"cuda_device_index\":" << server.cuda_device_index << "}";
         logger.Event(json.str());
     }
 
+    // 3. Open the WebSocket (harness owns the socket; the facade is threadless),
+    //    then Connect() through the facade: it re-discovers, gates protocol
+    //    compatibility, and announces the client's feature flags on the socket.
+    std::string wsError;
+    const bool wsConnected = ws.Connect(options.wsTimeoutMs, wsError);
+    cec::Result<cec::Session> session = client.Connect();
+    facadeLog.Action("connect", "", session ? "ok" : "fail", session ? "" : session.GetError().message);
+
     if (options.phase == Phase::Negotiation)
     {
-        RunNegotiationCases(recorder, http, ws, options, serverCompat);
+        RunNegotiationCases(recorder, client, ws, facadeLog, options, server, session, wsConnected);
+    }
+    else if (!session)
+    {
+        summary.setupFailureCode = "server_feature_mismatch";
+        logger.Event("{\"record\":\"setup_failure\",\"stage\":\"connect\",\"error\":" +
+                     CaseLogger::Quote(session.GetError().message) + "}");
+        ws.Close();
+        WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
+        return summary;
     }
     else
     {
-        RunDeliveryCases(recorder, http, ws, options, logger, deployment, cudaReader);
+        DeliveryContext ctx{recorder, client,    http,   ws,        logger,    facadeLog,
+                            sink,     liveState, options, server,   cudaReader};
+        RunDeliveryCases(ctx);
     }
 
+    ws.Close();
     logger.WriteIndex();
     WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
     return summary;
