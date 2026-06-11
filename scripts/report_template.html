@@ -130,6 +130,9 @@ function headStatus(run) {
   if (r.repository || r.ref || r.commit || r.extension_commit) {
     cards.push(card("Source", r.repository || "repository", [r.ref && `ref ${r.ref}`, (r.commit || r.extension_commit) && `commit ${short(r.commit || r.extension_commit)}`].filter(Boolean).join(" · ")));
   }
+  if (r.conformance_action_ref) {
+    cards.push(card("Conformance action", r.conformance_action_ref, "jKaarlehto/comfy-action tag"));
+  }
   const ctx = document.getElementById("head-context");
   if (ctx) ctx.innerHTML = cards.join("");
 
