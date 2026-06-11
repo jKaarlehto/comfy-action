@@ -247,6 +247,7 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
         "cpp_client_supports_protocol": env_value("cpp_client_supports_protocol"),
         "default_comfyui_ref": env_value("default_comfyui_ref"),
         "tested_comfyui_refs": env_value("tested_comfyui_refs"),
+        "conformance_action_ref": env_value("conformance_action_ref"),
     }
 
     # Totals/result come from conformance-result.json, but fall back to
@@ -356,6 +357,7 @@ def aggregate_run(jobs: dict, run_meta: dict | None = None) -> dict:
             "cpp_client_supports_protocol",
             "default_comfyui_ref",
             "tested_comfyui_refs",
+            "conformance_action_ref",
         ):
             if not run.get(key) and env.get(key):
                 run[key] = env.get(key)
