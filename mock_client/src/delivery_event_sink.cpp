@@ -81,13 +81,6 @@ void DeliveryEventSink::OnEvent(const ComfyExtensionClient::ClientEvent& event)
     }
 }
 
-void DeliveryEventSink::OnBinaryMessage(const ComfyExtensionClient::ClientBinaryMessage& /*message*/)
-{
-    // Delivery verdicts come from JSON events; binary preview frames are not part
-    // of the delivery contract (their correlation is covered by the facade's own
-    // unit check). Ignored here.
-}
-
 void DeliveryEventSink::OnParseError(const ComfyExtensionClient::Error& error)
 {
     // Unhandled / third-party frames are context, never a delivery verdict.

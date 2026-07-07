@@ -39,7 +39,10 @@ endif()
 find_package(CUDAToolkit QUIET)
 
 # Transport-agnostic contract logic. Depends only on the client interface, so it
-# can be reused and self-tested without the transport library.
+# can be reused and self-tested without the transport library. service_shim.cpp
+# parses /features and /notch/get-required-files with jsonxx (vendored inside the
+# client checkout, compiled into the comfy_extension_client library), so the
+# matrix needs its include directory.
 add_library(notch_mock_matrix STATIC
     src/matrix.cpp
     src/case_logger.cpp
@@ -47,11 +50,13 @@ add_library(notch_mock_matrix STATIC
     src/delivery_event_sink.cpp
     src/hash_utils.cpp
     src/delivery_types.cpp
+    src/service_shim.cpp
     src/verify/verify_byte_exact.cpp
     src/verify/verify_integrity.cpp
     src/verify/verify_structural.cpp
 )
 target_include_directories(notch_mock_matrix PUBLIC src)
+target_include_directories(notch_mock_matrix PRIVATE ${COMFY_EXTENSION_CLIENT_DIR}/third_party/jsonxx)
 target_link_libraries(notch_mock_matrix PUBLIC comfy_extension_client)
 
 # The CI executable: wires the IXWebSocket transports into the matrix.

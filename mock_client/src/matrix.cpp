@@ -56,8 +56,8 @@ std::vector<std::string> ExpectedTypeTransports(const std::string& type)
     return {"disk", "http"};
 }
 
-// JSON for an OutputTransportDecision (the facade's negotiation result).
-std::string DecisionJson(const cec::OutputTransportDecision& decision)
+// JSON for an OutputTransportDecision (the shim's negotiation result).
+std::string DecisionJson(const OutputTransportDecision& decision)
 {
     std::ostringstream json;
     json << "{\"ok\":" << CaseLogger::Bool(decision.ok)
@@ -230,7 +230,6 @@ const char* const kSpecReadiness = "notch_conformance_spec.md §4 deployment-rea
 const char* const kSpecLiveness = "notch_conformance_spec.md §4 setup/liveness (A0)";
 const char* const kSpecDeliveryLocal = "notch_conformance_spec.md §4 Layer 2 delivery-local";
 const char* const kSpecDeliveryRemote = "notch_conformance_spec.md §4 Layer 2 delivery-remote";
-const char* const kSpecFacade = "notch_conformance_spec.md §4 facade behavior (caching/validation/correlation)";
 
 } // namespace
 
@@ -267,18 +266,18 @@ namespace
 {
 
 // Build a synthetic OutputTransportRequest from explicit transport sets so the
-// facade's SelectOutputTransport drives the pure (no-server) selection matrix and
+// shim's SelectOutputTransport drives the pure (no-server) selection matrix and
 // the reject decisions. type-allowed rides on the WorkflowOutput.transports and
 // server-available rides on ServerFacts.output_transports — the same two
-// Comfy-owned sets the facade reads from a parsed contract and negotiated session.
-cec::OutputTransportRequest MakeTransportRequest(
+// Comfy-owned sets a client reads from a parsed contract and live /features.
+OutputTransportRequest MakeTransportRequest(
     const std::vector<std::string>& typeAllowed,
     const std::vector<std::string>& serverAvailable,
     const std::vector<std::string>& clientReachable,
     const std::vector<std::string>& preferenceOrder,
     const std::string& requiredTransport)
 {
-    cec::OutputTransportRequest request;
+    OutputTransportRequest request;
     request.output.name = "selection";
     request.output.type = "synthetic";
     request.output.transports = typeAllowed;
@@ -289,7 +288,7 @@ cec::OutputTransportRequest MakeTransportRequest(
     return request;
 }
 
-void RunSelectionRow(CaseRecorder& recorder, cec::Client& client, FacadeLog& facadeLog, const SelectionRow& row, bool soft)
+void RunSelectionRow(CaseRecorder& recorder, FacadeLog& facadeLog, const SelectionRow& row, bool soft)
 {
     const std::vector<std::string> typeAllowed = Split(row.typeAllowed);
     const std::vector<std::string> serverAvailable = Split(row.serverAvailable);
@@ -297,9 +296,9 @@ void RunSelectionRow(CaseRecorder& recorder, cec::Client& client, FacadeLog& fac
     const std::vector<std::string> preference = soft ? Split(row.requiredOrPreference) : std::vector<std::string>{};
     const std::string required = soft ? "" : row.requiredOrPreference;
 
-    cec::OutputTransportRequest request =
+    OutputTransportRequest request =
         MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, preference, required);
-    cec::OutputTransportDecision decision = client.SelectOutputTransport(request);
+    OutputTransportDecision decision = SelectOutputTransport(request);
 
     facadeLog.SetCase(row.id);
     facadeLog.Action("select_output_transport",
@@ -337,14 +336,14 @@ void RunSelectionRow(CaseRecorder& recorder, cec::Client& client, FacadeLog& fac
     recorder.Record(rec);
 }
 
-// Deployment-readiness decision (Layer 1, no execution): the facade's
+// Deployment-readiness decision (Layer 1, no execution): the shim's
 // GetRequiredFiles posts /notch/get-required-files; any required file with
 // exists=false ⇒ not-ready ⇒ the client would block the run. Verifies the
 // readiness decision only — server-published facts, a user-actionable decision,
 // orthogonal to transport selection.
 void RunReadinessCase(
     CaseRecorder& recorder,
-    cec::Client& client,
+    ServiceShim& shim,
     FacadeLog& facadeLog,
     const std::string& caseId,
     const std::string& title,
@@ -360,7 +359,7 @@ void RunReadinessCase(
     rec.specRef = kSpecReadiness;
 
     facadeLog.SetCase(caseId);
-    cec::Result<std::vector<cec::RequiredFile> > files = client.GetRequiredFiles(workflowJson);
+    cec::Result<std::vector<RequiredFile> > files = shim.GetRequiredFiles(workflowJson);
     if (!files)
     {
         facadeLog.Action("get_required_files", "", "fail", files.GetError().message);
@@ -487,7 +486,7 @@ std::string NamedRouteRelativeDirectory(const MatrixOptions& options)
     return "remote-route";
 }
 
-bool NamedRouteConfiguredForClient(const MatrixOptions& options, const cec::ServerFacts& server)
+bool NamedRouteConfiguredForClient(const MatrixOptions& options, const ServerFacts& server)
 {
     return !options.namedRouteId.empty() && !options.namedRouteClientRoot.empty() &&
            ContainsString(server.named_disk_route_ids, options.namedRouteId);
@@ -511,7 +510,7 @@ bool IsWslPlatform()
            line.find("WSL") != std::string::npos;
 }
 
-std::vector<std::string> DeliveryServerTransports(const cec::ServerFacts& server)
+std::vector<std::string> DeliveryServerTransports(const ServerFacts& server)
 {
     std::vector<std::string> transports;
     for (size_t i = 0; i < server.output_transports.size(); ++i)
@@ -540,7 +539,7 @@ std::vector<std::string> ClientReachableTransports(
     Phase phase,
     bool namedRouteDisk,
     const MatrixOptions& options,
-    const cec::ServerFacts& server)
+    const ServerFacts& server)
 {
     if (phase != Phase::DeliveryRemote)
     {
@@ -668,6 +667,7 @@ struct DeliveryContext
 {
     CaseRecorder& recorder;
     cec::Client& client;
+    ServiceShim& shim;
     cec::HttpTransport& http;
     IWebSocketProbe& ws;
     CaseLogger& logger;
@@ -675,15 +675,15 @@ struct DeliveryContext
     DeliveryEventSink& sink;
     DeliveryRunState& state;
     const MatrixOptions& options;
-    const cec::ServerFacts& server;
+    const ServerFacts& server;
     ICudaShareReader* cudaReader;
 };
 
-// Drain the live WebSocket and forward every frame to the facade
-// (Client::OnWebSocketText). The facade parses, correlates prompt -> consumer,
-// and dispatches to the DeliveryEventSink, which records the terminal lifecycle
-// event, the matching notch-output-ready, and the matching notch-cuda-share-status
-// into state. The harness owns this loop's timing because the facade is threadless.
+// Drain the live WebSocket and forward every frame to the client codec
+// (Client::OnWebSocketText). The codec parses and dispatches to the
+// DeliveryEventSink, which records the terminal lifecycle event, the matching
+// notch-output-ready, and the matching notch-cuda-share-status into state. The
+// harness owns this loop's timing because the codec is threadless.
 void WaitForDelivery(DeliveryContext& ctx, const std::string& transport, int timeoutMs)
 {
     const std::chrono::steady_clock::time_point deadline =
@@ -1027,9 +1027,9 @@ void RunFilePathDeliveryCase(
         ClientReachableTransports(options.phase, useNamedRouteDisk, options, ctx.server);
     const std::vector<std::string> typeAllowed = TypeAllowedTransports(contract);
     const std::vector<std::string> serverAvailable = DeliveryServerTransports(ctx.server);
-    cec::OutputTransportRequest selectionRequest =
+    OutputTransportRequest selectionRequest =
         MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, std::vector<std::string>{}, transport);
-    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(selectionRequest);
+    OutputTransportDecision decision = SelectOutputTransport(selectionRequest);
     ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
                          decision.ok ? "ok" : "fail", decision.error);
 
@@ -1079,8 +1079,8 @@ void RunFilePathDeliveryCase(
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson(contract.inputType, contract.slotName);
 
-    // Parse the workflow through the facade first: this caches the contract that
-    // Submit's pre-flight validation and the stateful SelectOutputTransport rely on.
+    // Parse the workflow first: proves /notch/parse accepts the case's round-trip
+    // workflow before the inject round trip.
     cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
     ctx.facadeLog.Action("parse_workflow",
                          parsed ? ("\"inputs\":" + std::to_string(parsed.Value().inputs.size()) +
@@ -1088,7 +1088,7 @@ void RunFilePathDeliveryCase(
                                 : "",
                          parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
 
-    cec::SubmitRequest submit;
+    cec::GenerateRequest submit;
     submit.workflow_json = workflowJson;
     submit.client_id = options.clientId;
     submit.consumer_id = consumerId;
@@ -1114,9 +1114,9 @@ void RunFilePathDeliveryCase(
     ctx.sink.Configure("", consumerId, transport);
 
     const long logStart = FileSize(ServerLogPath(options));
-    cec::Result<cec::JobHandle> job = ctx.client.Submit(submit);
-    // The facade builds and sends the inject request internally; the raw body is
-    // captured by http.jsonl and the submit step in facade-trace.log.
+    cec::Result<cec::JobHandle> job = ctx.shim.Submit(submit);
+    // The client codec builds and sends the inject request internally; the raw
+    // body is captured by http.jsonl and the submit step in facade-trace.log.
     const std::string injectRequestBody;
     ctx.facadeLog.Action("submit",
                          job ? ("\"queued\":" + CaseLogger::Bool(job.Value().queued) + ",\"prompt_id\":" +
@@ -1178,8 +1178,8 @@ void RunFilePathDeliveryCase(
         }
         else if (transport == "http")
         {
-            // Fetch the artifact through the facade (Client::FetchOutput GETs the url).
-            cec::Result<cec::GeneratedResult> fetched = ctx.client.FetchOutput(ctx.state.output);
+            // Fetch the artifact through the shim (FetchOutput GETs the url).
+            cec::Result<GeneratedResult> fetched = ctx.shim.FetchOutput(ctx.state.output);
             ctx.facadeLog.Action("fetch_output",
                                  fetched ? ("\"status\":" + std::to_string(fetched.Value().status_code) +
                                             ",\"bytes\":" + std::to_string(fetched.Value().bytes.size()))
@@ -1209,9 +1209,8 @@ void RunFilePathDeliveryCase(
     const bool namedRouteHandoffOk = !routeHandoffApplies ||
         (ctx.state.outputReady && ctx.state.output.named_route_id == options.namedRouteId &&
          IsSafeRelativePath(ctx.state.output.relative_path) && ctx.state.output.path.empty());
-    // Facade correlation assertion: the facade resolves the owning consumer from
-    // its prompt -> consumer cache, so a delivered OutputReady carries our
-    // consumer_id even though the wire event keys on the output name.
+    // Correlation assertion: the server echoes the submitted consumer_id on the
+    // notch-output-ready event, so a delivered OutputReady identifies its owner.
     const bool correlationOk = !ctx.state.outputReady || ctx.state.output.consumer_id == consumerId;
     if (ctx.state.outputReady)
     {
@@ -1359,10 +1358,10 @@ void RunCudaDeliveryCase(
 
     const std::vector<std::string> clientReachable = ClientReachableTransports(options.phase);
     const std::vector<std::string> serverAvailable = DeliveryServerTransports(ctx.server);
-    cec::OutputTransportRequest selectionRequest =
+    OutputTransportRequest selectionRequest =
         MakeTransportRequest(std::vector<std::string>{"cuda", "disk", "http"}, serverAvailable, clientReachable,
                              std::vector<std::string>{}, "cuda");
-    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(selectionRequest);
+    OutputTransportDecision decision = SelectOutputTransport(selectionRequest);
     ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
                          decision.ok ? "ok" : "fail", decision.error);
 
@@ -1416,7 +1415,7 @@ void RunCudaDeliveryCase(
     imageInput.raw_buffer.format = "float32_rgb";
     imageInput.raw_buffer.stride = width * 3 * 4;
 
-    cec::SubmitRequest submit;
+    cec::GenerateRequest submit;
     submit.workflow_json = workflowJson;
     submit.client_id = options.clientId;
     submit.consumer_id = consumerId;
@@ -1428,7 +1427,7 @@ void RunCudaDeliveryCase(
     ctx.sink.Configure("", consumerId, "cuda");
 
     const long logStart = FileSize(ServerLogPath(options));
-    cec::Result<cec::JobHandle> job = ctx.client.Submit(submit);
+    cec::Result<cec::JobHandle> job = ctx.shim.Submit(submit);
     ctx.facadeLog.Action("submit",
                          job ? ("\"queued\":" + CaseLogger::Bool(job.Value().queued) + ",\"prompt_id\":" +
                                 CaseLogger::Quote(job.Value().prompt_id))
@@ -1669,104 +1668,20 @@ void WriteResultFile(const std::string& outputRoot, const std::string& phaseName
     stream << CaseLogger::PrettyPrint(json.str()) << "\n";
 }
 
-// Facade-behavior assertions against the live server (spec §facade): the things
-// the suite could not catch while it bypassed the Client facade — pre-flight
-// validation of a missing required input, and contract caching feeding the
-// stateful SelectOutputTransport. Correlation is asserted inside the http deliver
-// case (a delivered OutputReady must carry the correlated consumer_id).
-void RunFacadeBehaviorCase(DeliveryContext& ctx)
-{
-    const MatrixOptions& options = ctx.options;
-    CaseRecord rec;
-    rec.caseId = "facade-behavior";
-    rec.title = "Client facade: contract caching + pre-flight validation";
-    rec.phase = options.phase == Phase::DeliveryRemote ? "delivery-remote" : "delivery-local";
-    rec.description = "Drives Client::ParseWorkflow (caches the contract), then asserts the stateful "
-                      "SelectOutputTransport resolves from that cache and Submit's pre-flight blocks a missing "
-                      "required input before any inject round trip.";
-    rec.specRef = kSpecFacade;
-    ctx.facadeLog.SetCase("facade-behavior");
-
-    const std::string workflowJson = BuildRoundTripWorkflowJson("STRING", "file_path");
-    cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
-    ctx.facadeLog.Action("parse_workflow",
-                         parsed ? ("\"outputs\":" + std::to_string(parsed.Value().outputs.size())) : "",
-                         parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
-    if (!parsed || parsed.Value().outputs.empty())
-    {
-        rec.result = "error";
-        rec.actualJson = "{\"parse_ok\":false}";
-        rec.errors.push_back("parse_contract_mismatch");
-        ctx.recorder.Record(rec);
-        return;
-    }
-
-    // Caching: the stateful overload pulls type-allowed from the cached contract
-    // and server-available from the negotiated session; only the policy is ours.
-    cec::TransportPolicy policy;
-    policy.reachable_transports.push_back("http");
-    policy.reachable_transports.push_back("disk");
-    policy.preference_order.push_back("http");
-    policy.preference_order.push_back("disk");
-    const std::string outputName = parsed.Value().outputs[0].name;
-    cec::OutputTransportDecision cached = ctx.client.SelectOutputTransport(workflowJson, outputName, policy);
-    ctx.facadeLog.Action("select_output_transport.cached",
-                         "\"output\":" + CaseLogger::Quote(outputName) + ",\"transport\":" +
-                             CaseLogger::Quote(cached.transport),
-                         cached.ok ? "ok" : "fail", cached.error);
-    const bool cachingOk = cached.ok && !cached.usable_transports.empty();
-
-    // Pre-flight validation: omit the required input; Submit must fail client-side
-    // with the missing-input list, before any HTTP inject.
-    cec::SubmitRequest missing;
-    missing.workflow_json = workflowJson;
-    missing.client_id = options.clientId;
-    missing.consumer_id = "facade-behavior";
-    missing.execute = false;
-    missing.output = cec::OutputRequest::Http("file_path", "bin");
-    cec::Result<cec::JobHandle> blocked = ctx.client.Submit(missing);
-    const bool preflightOk = !blocked && !blocked.GetError().missing_required_inputs.empty();
-    ctx.facadeLog.Action("submit.preflight",
-                         "\"missing\":" + CaseLogger::Array(blocked.GetError().missing_required_inputs),
-                         preflightOk ? "ok" : "fail", blocked ? "submit unexpectedly accepted" : "");
-
-    const bool ok = cachingOk && preflightOk;
-    std::ostringstream actual;
-    actual << "{\"caching_ok\":" << CaseLogger::Bool(cachingOk)
-           << ",\"cached_usable\":" << CaseLogger::Array(cached.usable_transports)
-           << ",\"preflight_blocked\":" << CaseLogger::Bool(!blocked)
-           << ",\"missing_required_inputs\":" << CaseLogger::Array(blocked.GetError().missing_required_inputs) << "}";
-    rec.expectedJson = "{\"caching_ok\":true,\"preflight_blocked\":true}";
-    rec.actualJson = actual.str();
-    rec.result = ok ? "pass" : "fail";
-    if (!cachingOk)
-    {
-        rec.errors.push_back("contract_cache_select_failed");
-    }
-    if (!preflightOk)
-    {
-        rec.errors.push_back("preflight_validation_missing");
-    }
-    const int index = ctx.recorder.Record(rec);
-    if (!ctx.facadeLog.Lines().empty())
-    {
-        ctx.logger.AppendCaseFile(index, "facade-behavior", "facade-trace.log", ctx.facadeLog.Lines());
-    }
-}
-
 // Negotiation phase (Layer 1): discovery, compatibility, readiness decision, the
-// transport-selection matrix (driven through the facade), and the WS handshake.
+// transport-selection matrix, and the WS handshake.
 void RunNegotiationCases(
     CaseRecorder& recorder,
     cec::Client& client,
+    ServiceShim& shim,
     IWebSocketProbe& ws,
     FacadeLog& facadeLog,
     const MatrixOptions& options,
-    const cec::ServerFacts& server,
-    const cec::Result<cec::Session>& session,
+    const ServerFacts& server,
+    const cec::Result<Session>& session,
     bool wsConnected)
 {
-    // 3. Server/plugin protocol compatibility, from the facade handshake.
+    // 3. Server/plugin protocol compatibility, from the shim's Connect gate.
     {
         const bool ok = static_cast<bool>(session);
         std::ostringstream actual;
@@ -1779,7 +1694,7 @@ void RunNegotiationCases(
         rec.caseId = "server-protocol-compatibility";
         rec.title = "Plugin/server protocol range is compatible with the C++ client";
         rec.phase = "liveness";
-        rec.description = "Client::Connect() gates on protocol compatibility over live /features facts: the C++ "
+        rec.description = "The Connect gate checks protocol compatibility over live /features facts: the C++ "
                           "client and plugin/server protocol ranges intersect.";
         rec.specRef = kSpecLiveness;
         rec.expectedJson = "{\"ok\":true}";
@@ -1851,7 +1766,7 @@ void RunNegotiationCases(
         }
     }
 
-    // 4b. Deployment-readiness gate via Client::GetRequiredFiles.
+    // 4b. Deployment-readiness gate via the shim's GetRequiredFiles.
     if (options.requiredFilesReadyJson.empty() && options.requiredFilesMissingJson.empty())
     {
         CaseRecord rec;
@@ -1868,32 +1783,32 @@ void RunNegotiationCases(
     {
         if (!options.requiredFilesReadyJson.empty())
         {
-            RunReadinessCase(recorder, client, facadeLog, "deployment-ready",
+            RunReadinessCase(recorder, shim, facadeLog, "deployment-ready",
                 "All required input files present -> ready",
                 "Every file-backed input the workflow references exists on the server, so the run is ready.",
                 options.requiredFilesReadyJson, true);
         }
         if (!options.requiredFilesMissingJson.empty())
         {
-            RunReadinessCase(recorder, client, facadeLog, "deployment-missing-file",
+            RunReadinessCase(recorder, shim, facadeLog, "deployment-missing-file",
                 "A required input file is missing -> not ready (client would block)",
                 "The workflow references a file the server does not have; the readiness decision is not-ready and the client would block the run.",
                 options.requiredFilesMissingJson, false);
         }
     }
 
-    // 5. Transport-selection matrix, driven through Client::SelectOutputTransport.
+    // 5. Transport-selection matrix, driven through the shim's SelectOutputTransport.
     for (const SelectionRow& row : kHardRows)
     {
-        RunSelectionRow(recorder, client, facadeLog, row, /*soft=*/false);
+        RunSelectionRow(recorder, facadeLog, row, /*soft=*/false);
     }
     for (const SelectionRow& row : kSoftRows)
     {
-        RunSelectionRow(recorder, client, facadeLog, row, /*soft=*/true);
+        RunSelectionRow(recorder, facadeLog, row, /*soft=*/true);
     }
 
-    // 6. WebSocket handshake: the harness connected the socket and Client::Connect
-    //    announced the feature flags on it. Re-announce via the facade and drain.
+    // 6. WebSocket handshake: the harness connected the socket and the Connect
+    //    gate announced the feature flags on it. Re-announce and drain.
     {
         if (!wsConnected)
         {
@@ -1912,7 +1827,7 @@ void RunNegotiationCases(
         else
         {
             facadeLog.SetCase("ws-handshake");
-            cec::Result<bool> sent = client.SendFeatureFlags();
+            cec::Result<bool> sent = shim.SendFeatureFlags();
             facadeLog.Action("send_feature_flags", "", sent ? "ok" : "fail", sent ? "" : sent.GetError().message);
             std::vector<std::string> frames = ws.DrainReceived();
             std::ostringstream actual;
@@ -1953,9 +1868,9 @@ std::string DeliveryCaseTitle(const DeliveryCaseDescriptor& d)
     return d.outputType + " over " + d.transport + " rejected by " + RejectAxisName(d.verdict) + " (" + d.topology + ")";
 }
 
-// A reject case is pure client-side negotiation through the facade: the client
-// computes usable = type-allowed n server-available n client-reachable and must
-// refuse the requested transport before any inject (no silent downgrade).
+// A reject case is pure client-side negotiation: the client computes usable =
+// type-allowed n server-available n client-reachable and must refuse the
+// requested transport before any inject (no silent downgrade).
 void RunRejectCase(
     DeliveryContext& ctx,
     const DeliveryCaseDescriptor& descriptor,
@@ -1963,10 +1878,10 @@ void RunRejectCase(
     const std::vector<std::string>& clientReachable)
 {
     const std::vector<std::string> typeAllowed = TypeAllowedTransports(*descriptor.type);
-    cec::OutputTransportRequest request =
+    OutputTransportRequest request =
         MakeTransportRequest(typeAllowed, serverAvailable, clientReachable, std::vector<std::string>{},
                              descriptor.transport);
-    cec::OutputTransportDecision decision = ctx.client.SelectOutputTransport(request);
+    OutputTransportDecision decision = SelectOutputTransport(request);
     ctx.facadeLog.SetCase(descriptor.id);
     ctx.facadeLog.Action("select_output_transport", "\"transport\":" + CaseLogger::Quote(decision.transport),
                          decision.ok ? "ok" : "fail", decision.error);
@@ -2047,9 +1962,6 @@ void RunDeliveryCases(DeliveryContext& ctx)
 {
     const std::vector<std::string> server = DeliveryServerTransports(ctx.server);
 
-    // Facade-behavior assertions run once per delivery phase (caching + pre-flight).
-    RunFacadeBehaviorCase(ctx);
-
     if (ctx.options.phase == Phase::DeliveryLocal)
     {
         const TopologyConfig local{"local", server, std::vector<std::string>{"cuda", "disk", "http"}};
@@ -2104,9 +2016,9 @@ MatrixSummary RunConformance(
     cec::ClientOptions clientOptions;
     clientOptions.client_id = options.clientId;
     clientOptions.http_transport = &http;
-    clientOptions.web_socket_transport = &ws;
     clientOptions.event_sink = &sink;
     cec::Client client(clientOptions);
+    ServiceShim shim(client, http, &ws);
 
     // 1. Record the linked-against C++ client facts.
     cec::CppClientFacts clientFacts = cec::Client::facts();
@@ -2124,8 +2036,8 @@ MatrixSummary RunConformance(
         logger.Event(json.str());
     }
 
-    // 2. Shared setup: discover server facts via the facade (live GET /features).
-    cec::Result<cec::ServerFacts> discovered = client.Discover();
+    // 2. Shared setup: discover server facts via the shim (live GET /features).
+    cec::Result<ServerFacts> discovered = shim.Discover();
     facadeLog.Action("discover", discovered ? "" : "", discovered ? "ok" : "fail",
                      discovered ? "" : discovered.GetError().message);
     if (!discovered)
@@ -2136,7 +2048,7 @@ MatrixSummary RunConformance(
         WriteResultFile(options.outputRoot, PhaseName(options.phase), summary);
         return summary;
     }
-    const cec::ServerFacts server = discovered.Value();
+    const ServerFacts server = discovered.Value();
     {
         std::ostringstream json;
         json << "{\"record\":\"plugin_server_facts\""
@@ -2151,17 +2063,17 @@ MatrixSummary RunConformance(
         logger.Event(json.str());
     }
 
-    // 3. Open the WebSocket (harness owns the socket; the facade is threadless),
-    //    then Connect() through the facade: it re-discovers, gates protocol
+    // 3. Open the WebSocket (harness owns the socket; the codec is threadless),
+    //    then Connect() through the shim: it re-discovers, gates protocol
     //    compatibility, and announces the client's feature flags on the socket.
     std::string wsError;
     const bool wsConnected = ws.Connect(options.wsTimeoutMs, wsError);
-    cec::Result<cec::Session> session = client.Connect();
+    cec::Result<Session> session = shim.Connect();
     facadeLog.Action("connect", "", session ? "ok" : "fail", session ? "" : session.GetError().message);
 
     if (options.phase == Phase::Negotiation)
     {
-        RunNegotiationCases(recorder, client, ws, facadeLog, options, server, session, wsConnected);
+        RunNegotiationCases(recorder, client, shim, ws, facadeLog, options, server, session, wsConnected);
     }
     else if (!session)
     {
@@ -2174,8 +2086,8 @@ MatrixSummary RunConformance(
     }
     else
     {
-        DeliveryContext ctx{recorder, client,    http,   ws,        logger,    facadeLog,
-                            sink,     liveState, options, server,   cudaReader};
+        DeliveryContext ctx{recorder, client,    shim,    http,   ws,      logger, facadeLog,
+                            sink,     liveState, options, server, cudaReader};
         RunDeliveryCases(ctx);
     }
 
