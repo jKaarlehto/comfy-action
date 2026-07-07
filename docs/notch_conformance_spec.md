@@ -74,8 +74,8 @@ authoritative symbol/section in ComfyUI-Notch (no line numbers — verify by nam
 | A1 | **Type-allowed (T)** | `image`, `non-image` | 2 | `OUTPUT_TYPES_BY_TRANSPORT` in `core/data_types.py`. The axis exists **only because cuda is image-only**: the output type is what gates whether cuda is an allowed transport at all. So there are exactly two classes — `image` (→ cuda,disk,http) and `non-image` (→ disk,http) — and any concrete non-image type (FILE_3D_GLB, AUDIO, MESH, …) is one fixture realizing the same `non-image` class. |
 | A2 | **Server-available (S)** | no-cuda: `{disk,http}`; cuda: `{cuda,disk,http}` | 2 meaningful classes | `supported_output_transports()` / `notch_feature_facts()` in `services/server_capabilities.py` |
 | A3 | **Client-reachable / locality (C)** | reachable **sets**: `{cuda,disk,http}`, `{disk,http}`, `{http}` | 3 sets (regimes: local / route-disk / http-only) | `features.md` §"The transports"; helper is set-based per §Status "Client-interface set helper" |
-| A4 | Request mode | `hard`, `soft` | 2 | `SelectOutputTransport` in `cpp/comfy_extension_client` (`m_requiredTransport` vs `m_preferenceOrder`) |
-| A5 | **Deployment-readiness decision** (no execution) | all required files exist vs ≥1 missing | 2 | `/notch/get-required-files` (`api/file_manifest_handler.py`), `file_manifest_service.py`; C++ `ParseRequiredFilesResponse` → `RequiredFile.exists` |
+| A4 | Request mode | `hard`, `soft` | 2 | `notch_mock::SelectOutputTransport` in `mock_client/src/service_shim.cpp` (`required_transport` vs `preference_order`) |
+| A5 | **Deployment-readiness decision** (no execution) | all required files exist vs ≥1 missing | 2 | `/notch/get-required-files` (`api/file_manifest_handler.py`), `file_manifest_service.py`; mock `ServiceShim::GetRequiredFiles` → `RequiredFile.exists` |
 
 **Out of scope (not axes):** request-scoped feature/generation policies —
 `embed_file_manifest` output embedding, previews, persisted values,
@@ -497,8 +497,8 @@ Edit §2, then the tables in `mock_client/` follow:
 | wire-compat | client/server protocol versions agree | `core/client_compatibility.py`; C++ `CheckServerCompatibility` | live |
 | WS handshake | `/ws` accepts feature_flags, sends catch-up | `api/websocket.py`; `register_server_feature_flags` in `comfy_adapter/runtime.py` | live (shallow) |
 | type-axis | `/notch/parse` `outputs[].transports` per type | `get_workflow_outputs` in `services/notch_workflow_graph.py`; `OUTPUT_TYPES_BY_TRANSPORT` | live |
-| readiness decision (L1) | required files `exists`; client-side "any missing ⇒ not-ready" decision | `api/file_manifest_handler.py`; `file_manifest_service.py`; C++ `ParseRequiredFilesResponse` | live (client decision) |
-| hard/soft selection | `usable = T∩S∩C`; client returns not-usable (no downgrade) | C++ `SelectOutputTransport` (client-side decision); expected sets from `OUTPUT_TYPES_BY_TRANSPORT`, `supported_output_transports()` | pure helper (server-grounded expectations) |
+| readiness decision (L1) | required files `exists`; client-side "any missing ⇒ not-ready" decision | `api/file_manifest_handler.py`; `file_manifest_service.py`; mock `ServiceShim::GetRequiredFiles` | live (client decision) |
+| hard/soft selection | `usable = T∩S∩C`; client returns not-usable (no downgrade) | mock `SelectOutputTransport` (client-side decision); expected sets from `OUTPUT_TYPES_BY_TRANSPORT`, `supported_output_transports()` | pure helper (server-grounded expectations) |
 | server hard-error (delivery) | an impossible requested transport is **rejected at inject**, not downgraded | `build_notch_output_config` / `assert_transport_available` in `services/output_config_service.py`, `services/server_capabilities.py` | live (delivery only) |
 | delivery round-trip | actual disk/http/cuda delivery + events + byte verification | `services.output_delivery`; `services.cuda_shares`; `notch-output-ready`; `notch-cuda-share-status` | live |
 
@@ -601,12 +601,12 @@ explain a failure but never cause one.
 ### 9a. WebSocket lifecycle assertions (client-side, no new server work)
 
 The mock client holds the `/ws` connection and forwards every frame into the
-facade (`Client::OnWebSocketText`), which parses lifecycle events keyed by
-`prompt_id`, correlates prompt → consumer, and dispatches typed `ClientEvent`s
+codec (`Client::OnWebSocketText`), which parses lifecycle events keyed by
+`prompt_id` and dispatches typed `ClientEvent`s
 (`EventKind::ExecutionSuccess` / `ExecutionError` / `ExecutionInterrupted`) to the
 `ClientEventSink`. Per execution case:
 
-1. Submit via `Client::Submit()` (`/notch/inject`); read `prompt_id` from the
+1. Submit via `Client::Generate()` (`/notch/inject`); read `prompt_id` from the
    returned `JobHandle`.
 2. Wait for the matching terminal event on `/ws`.
 3. Assert it: `execution_success` for positive cases; `execution_error` (with

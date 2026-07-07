@@ -14,10 +14,10 @@ namespace notch_mock
 {
 
 // Backed by ix::WebSocket. Implements IWebSocketProbe, which is-a
-// ComfyExtensionClient::WebSocketTransport: the harness owns the socket lifecycle
-// (Connect, drain received frames, Close) since the Client facade creates no
-// threads, and SendText carries the single outbound message the facade sends on
-// /ws — the feature-flags announce during Client::Connect(). Connects to
+// notch_mock::IWebSocketSender: the harness owns the socket lifecycle
+// (Connect, drain received frames, Close) since the client codec creates no
+// threads, and SendText carries the single outbound message the shim sends on
+// /ws — the feature-flags announce during the Connect gate. Connects to
 // /ws?clientId=<id> and records received text frames to
 // <outputRoot>/conformance/websocket.jsonl.
 class LocalWebSocketTransport : public IWebSocketProbe

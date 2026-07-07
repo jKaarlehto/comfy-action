@@ -198,50 +198,49 @@ Keep this mock client in the action/test harness, not in
 `cpp/comfy_extension_client`. The client interface remains bring-your-own-transport;
 the mock client is one consumer used by CI.
 
-The important boundary is that the mock client is a consumer of the **high-level
-`ComfyExtensionClient::Client` facade** — the same service-facing API a real Notch
-integrator links against — not a second protocol implementation and not a
-hand-rolled driver over the low-level wire builders. Every live-server interaction
-goes through the facade so the suite exercises the shipped client end to end:
+The important boundary matches the product split. The vendorable
+`ComfyExtensionClient::Client` is a slim protocol codec: typed `/notch/parse` and
+`/notch/inject` request/response handling plus WebSocket event parsing. The
+native Notch service owns discovery, the compatibility gate, transport
+negotiation, readiness, and artifact fetching. The mock client mirrors that
+split: the codec-owned surfaces go through `Client`, and the service-owned
+orchestration lives in `notch_mock::ServiceShim` (`service_shim.{h,cpp}`), the
+CI stand-in for the native service:
 
-1. `Client::Discover()` / `Client::Connect()` read server facts, gate protocol
-   compatibility, and announce the client's feature flags on the WebSocket.
-2. `Client::ParseWorkflow()` parses `/notch/parse` and caches the workflow
-   contract (the cache that Submit's pre-flight validation and the stateful
-   transport selection rely on).
-3. `Client::SelectOutputTransport()` performs transport negotiation — both the
-   explicit-set overload (the deterministic selection matrix and reject cases)
-   and the stateful `(workflow_json, output_name, policy)` overload that resolves
-   type-allowed and server-available sets from the cached contract and session.
-4. `Client::GetRequiredFiles()` drives the deployment-readiness decision.
-5. `Client::Submit()` validates against the cached contract (pre-flight
-   missing-input rejection) and sends the inject request for delivery cases.
+1. `ServiceShim::Discover()` / `ServiceShim::Connect()` read `/features` facts,
+   gate protocol compatibility (the semver-range logic the native service
+   applies), and announce the client's feature flags on the WebSocket
+   (`Client::FeatureFlagsMessage()` over the harness socket).
+2. `Client::ParseWorkflow()` parses `/notch/parse` into a workflow contract.
+3. `notch_mock::SelectOutputTransport()` performs transport negotiation from
+   explicit eligibility sets (the deterministic selection matrix and the reject
+   cases) — the reference implementation of usable = type-allowed ∩
+   server-available ∩ client-reachable.
+4. `ServiceShim::GetRequiredFiles()` drives the deployment-readiness decision.
+5. `Client::Generate()` (via `ServiceShim::Submit()`) builds and sends the
+   inject request for delivery cases.
 6. Incoming WebSocket frames are forwarded to `Client::OnWebSocketText()`; the
-   facade parses, correlates prompt → consumer, and dispatches typed events to a
-   `ClientEventSink`. `Client::FetchOutput()` retrieves HTTP artifacts.
+   codec parses and dispatches typed events to a `ClientEventSink`.
+   `ServiceShim::FetchOutput()` retrieves HTTP artifacts.
 
-The harness owns only what the facade deliberately does not: the socket lifecycle
-(`Connect`/`DrainReceived`/`Close` — the facade is threadless), disk reads, and
-CUDA IPC import. Beyond delivering bytes, the suite asserts facade-owned behavior
-against the live server — contract caching, pre-flight validation, and
-prompt → consumer correlation — in the `facade-behavior` case and the http
-delivery case. The low-level `ComfyExtensionClientProtocol` wire layer stays
-covered by the vendored `tests/compile_check.cpp` / `stub_check.cpp`; the delivery
-path no longer calls it directly. A semantic trace of every facade action is
-written to `facade-trace.log` (and `mock-client.jsonl`) alongside the raw
-`http.jsonl` / `websocket.jsonl` wire logs.
+The harness owns only what the codec and shim deliberately do not: the socket
+lifecycle (`Connect`/`DrainReceived`/`Close` — both are threadless), disk reads,
+and CUDA IPC import. Correlation is asserted in the http delivery case: the
+server must stamp the submitted consumer_id on the delivered notch-output-ready
+event. A semantic trace of every codec/shim action is written to
+`facade-trace.log` (and `mock-client.jsonl`) alongside the raw `http.jsonl` /
+`websocket.jsonl` wire logs.
 
 The mock client should provide small concrete transport adapters implementing the
-facade's transport interfaces (`ComfyExtensionClient::HttpTransport` /
-`WebSocketTransport`) so the `Client` drives them directly:
+codec's HTTP interface and the harness's WebSocket probe:
 
 - `LocalHttpTransport` (`: ComfyExtensionClient::HttpTransport`): sends local
   HTTP/1.1 requests to the ComfyUI server and writes sanitized request/response
   records to `http.jsonl`.
 - `LocalWebSocketTransport` (`: IWebSocketProbe`, which is-a
-  `ComfyExtensionClient::WebSocketTransport`): connects to
+  `notch_mock::IWebSocketSender`): connects to
   `/ws?clientId=<case-client-id>`, performs the local WebSocket handshake,
-  supports text send (the facade's feature-flags announce), records received text
+  supports text send (the shim's feature-flags announce), records received text
   frames to `websocket.jsonl`, and exposes `DrainReceived` so the harness can
   forward frames into `Client::OnWebSocketText`.
 - `CaseLogger`: writes `mock-client.jsonl`, case summaries, and stable failure
@@ -265,11 +264,10 @@ transport (`tests/stub_check.cpp`).
 
 Because the mock client links the checked-out `cpp/comfy_extension_client` source,
 interface drift in `ComfyUI-Notch` can make the action's `LocalHttpTransport`
-and `LocalWebSocketTransport` adapters stop conforming to the current
-`ComfyExtensionClient::HttpTransport` / `WebSocketTransport` contracts (or the
-`Client` facade API the orchestration drives). This is the most likely way
-a green action turns red after an otherwise unrelated extension change, so it
-must fail loudly, not cryptically:
+adapter stop conforming to the current `ComfyExtensionClient::HttpTransport`
+contract (or the `Client` codec API the orchestration drives). This is the most
+likely way a green action turns red after an otherwise unrelated extension
+change, so it must fail loudly, not cryptically:
 
 - **Build-time conformance.** Building the mock client is a separate, logged
   step. Capture the full compiler/linker output to `mock-client-build.log`. When

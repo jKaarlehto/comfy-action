@@ -7,23 +7,23 @@
 #include "comfy_extension_client/client.hpp"
 
 #include "case_logger.h"
+#include "service_shim.h"
 
 namespace notch_mock
 {
 
-// Minimal WebSocket probe owned by the harness. The Client facade creates no
-// threads, so the harness owns the socket lifecycle: connect, drain received
-// frames, and feed them back into Client::OnWebSocketText. It IS-A
-// ComfyExtensionClient::WebSocketTransport (inheriting its SendText), so a single
-// probe reference doubles as the facade's outbound transport for the
-// feature-flags announce the facade sends during Client::Connect().
-class IWebSocketProbe : public ComfyExtensionClient::WebSocketTransport
+// Minimal WebSocket probe owned by the harness. The client codec creates no
+// threads and has no socket surface, so the harness owns the socket lifecycle:
+// connect, drain received frames, and feed them back into
+// Client::OnWebSocketText. It IS-A IWebSocketSender so the same probe carries
+// the shim's outbound feature-flags announce.
+class IWebSocketProbe : public IWebSocketSender
 {
 public:
     virtual ~IWebSocketProbe() {}
     virtual bool Connect(int timeoutMs, std::string& error) = 0;
     // SendText(const std::string&, std::string&) is inherited (pure virtual) from
-    // ComfyExtensionClient::WebSocketTransport.
+    // IWebSocketSender.
     virtual std::vector<std::string> DrainReceived() = 0;
     virtual void Close() = 0;
 };

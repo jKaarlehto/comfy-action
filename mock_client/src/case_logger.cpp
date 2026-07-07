@@ -169,8 +169,8 @@ std::string CaseLogger::PrettyPrint(const std::string& compactJson)
     // multipart request body). Clamp the indent to [0, kMaxIndent] so unbalanced
     // or binary input can never drive string::append() to a huge/overflowing size
     // (which throws std::length_error and terminates the process).
-    const int kMaxIndent = 64;
     auto pad = [](int level) -> std::string {
+        const int kMaxIndent = 64;
         if (level < 0) level = 0;
         if (level > kMaxIndent) level = kMaxIndent;
         return std::string(static_cast<size_t>(level) * 2, ' ');
