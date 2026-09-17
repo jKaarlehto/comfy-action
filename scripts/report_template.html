@@ -76,6 +76,15 @@
   .hidden { display: none !important; }
   .empty { color: var(--muted); font-style: italic; }
   a { color: var(--info); }
+  @media (max-width: 900px), (max-height: 600px) {
+    header { position: static; }
+  }
+  @media (max-width: 600px) {
+    header { padding: 12px 16px; }
+    main { padding: 12px 16px 40px; }
+    .header-top { gap: 10px; }
+    .job > h2 { flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
