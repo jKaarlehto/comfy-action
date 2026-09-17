@@ -650,7 +650,7 @@ cec::Result<Session> ServiceShim::Connect()
         return cec::Result<Session>::Fail(discovered.GetError());
     }
 
-    const cec::CppClientFacts clientFacts = cec::Client::facts();
+    const cec::CppClientFacts clientFacts = cec::Client::GetFacts();
     const ServerFacts& server = discovered.Value();
     if (!ProtocolRangesIntersect(clientFacts.supports_protocol.value, server.supports_protocol.value))
     {

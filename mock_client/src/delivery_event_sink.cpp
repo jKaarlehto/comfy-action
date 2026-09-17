@@ -22,7 +22,7 @@ void DeliveryEventSink::OnEvent(const ComfyExtensionClient::ClientEvent& event)
 {
     using ComfyExtensionClient::EventKind;
 
-    const bool promptMatches = event.prompt_id.empty() || m_promptId.empty() || event.prompt_id == m_promptId;
+    const bool promptMatches = !m_promptId.empty() && event.prompt_id == m_promptId;
 
     switch (event.kind)
     {
@@ -60,20 +60,13 @@ void DeliveryEventSink::OnEvent(const ComfyExtensionClient::ClientEvent& event)
         }
         break;
     }
-    case EventKind::ExecutionSuccess:
-        if (promptMatches)
-        {
-            m_state.terminalType = "execution_success";
-            m_state.terminalSuccess = true;
-            m_log.Action("event.execution_success", "", "ok");
-        }
-        break;
-    case EventKind::ExecutionError:
-    case EventKind::ExecutionInterrupted:
+    case EventKind::ExecutionTerminal:
         if (promptMatches)
         {
             m_state.terminalType = event.type;
-            m_log.Action("event.execution_terminal", "\"type\":" + CaseLogger::Quote(event.type), "fail");
+            m_state.terminalSuccess = event.terminal_status == "success";
+            m_log.Action("event.execution_terminal", "\"status\":" + CaseLogger::Quote(event.terminal_status),
+                         m_state.terminalSuccess ? "ok" : "fail", event.message);
         }
         break;
     default:

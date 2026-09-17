@@ -9,10 +9,8 @@
 namespace notch_mock
 {
 
-// Outbound text channel the harness owns. The slim client is a protocol codec
-// with no WebSocket surface, so the harness sends the feature-flags announce
-// (Client::FeatureFlagsMessage) over its own socket.
-class IWebSocketSender
+// Outbound text channel shared by the harness and the client's delivery ACKs.
+class IWebSocketSender : public ComfyExtensionClient::WebSocketTransport
 {
 public:
     virtual ~IWebSocketSender() {}

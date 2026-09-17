@@ -331,8 +331,9 @@ nearly free.
     client-uploaded bytes (nothing leaves the client) unless a generic
     upload-to-temp mechanism is added.
 - **Verification class per type** (how the delivered output is checked):
-  - **byte-exact (SHA-256):** `file_path` only — the output is an exact `copy2`
-    of the staged server file, so fetched/copied bytes equal the source.
+  - **byte-exact (SHA-256):** `file_path` only — these cases explicitly disable
+    optional features, including embedded metadata, so fetched/copied bytes equal
+    the staged server file. Metadata-enabled delivery can legitimately change bytes.
   - **structural:** `file_3d`, `mesh`, `load3d_camera` — these reserialize
     (`File3D.save_to` re-emits the container, `save_glb_from_mesh` writes a GLB,
     `save_json_file` writes JSON), so delivered bytes legitimately differ from the

@@ -680,8 +680,8 @@ struct DeliveryContext
 };
 
 // Drain the live WebSocket and forward every frame to the client codec
-// (Client::OnWebSocketText). The codec parses and dispatches to the
-// DeliveryEventSink, which records the terminal lifecycle event, the matching
+// (Client::HandleWebSocketText). Apply the parsed events to DeliveryEventSink,
+// then acknowledge them. The sink records the terminal lifecycle event, the matching
 // notch-output-ready, and the matching notch-cuda-share-status into state. The
 // harness owns this loop's timing because the codec is threadless.
 void WaitForDelivery(DeliveryContext& ctx, const std::string& transport, int timeoutMs)
@@ -694,7 +694,16 @@ void WaitForDelivery(DeliveryContext& ctx, const std::string& transport, int tim
         for (size_t i = 0; i < batch.size(); ++i)
         {
             ctx.state.websocketFrames.push_back(batch[i]);
-            ctx.client.OnWebSocketText(batch[i]);
+            cec::Result<cec::ClientEvent> event = ctx.client.HandleWebSocketText(batch[i]);
+            if (event)
+            {
+                ctx.sink.OnEvent(event.Value());
+                ctx.client.ConfirmEventApplied(event.Value());
+            }
+            else
+            {
+                ctx.sink.OnParseError(event.GetError());
+            }
         }
         if (ctx.state.terminalSuccess && (transport == "cuda" ? ctx.state.cudaStatus : ctx.state.outputReady))
         {
@@ -1066,7 +1075,7 @@ void RunFilePathDeliveryCase(
 
     if (!decision.ok)
     {
-        rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"hash_match\":true}";
+        rec.expectedJson = "{\"selected\":true,\"terminal\":\"notch-execution-terminal\",\"hash_match\":true}";
         rec.actualJson = "{\"selected\":false,\"choice\":" + DecisionJson(decision) + "}";
         rec.result = "fail";
         rec.errors.push_back("unexpected_reject");
@@ -1083,7 +1092,7 @@ void RunFilePathDeliveryCase(
     // workflow before the inject round trip.
     cec::Result<cec::WorkflowContract> parsed = ctx.client.ParseWorkflow(workflowJson);
     ctx.facadeLog.Action("parse_workflow",
-                         parsed ? ("\"inputs\":" + std::to_string(parsed.Value().inputs.size()) +
+                         parsed ? ("\"inputs\":" + std::to_string(parsed.Value().input_declarations.size()) +
                                    ",\"outputs\":" + std::to_string(parsed.Value().outputs.size()))
                                 : "",
                          parsed ? "ok" : "fail", parsed ? "" : parsed.GetError().message);
@@ -1096,6 +1105,8 @@ void RunFilePathDeliveryCase(
     submit.broadcast_ws = true;
     if (contract.outputType == "file_path")
     {
+        // Byte-exact delivery excludes metadata that changes the source file.
+        submit.features.Disable(cec::WorkflowFeatureSet::All);
         submit.AddInput(cec::InputValue::String("test_input", sourcePath, contract.inputType));
     }
     else if (inlineInput)
@@ -1107,9 +1118,12 @@ void RunFilePathDeliveryCase(
         const std::string uploadName = contract.fixtureFile.empty() ? "input.bin" : contract.fixtureFile;
         submit.AddInput(cec::InputValue::Binary("test_input", sourceBytes, uploadName, contract.inputType));
     }
-    submit.output = BuildOutputRequest(transport, contract.outputType,
+    cec::OutputRequest outputRequest = BuildOutputRequest(transport, contract.outputType,
                                        OutputExtensionForType(contract.outputType, sourcePath), options,
                                        useNamedRouteDisk, caseId);
+    outputRequest.workflow_output_id = "2";
+    outputRequest.consumer_id = consumerId;
+    submit.AddOutput(outputRequest);
 
     ctx.sink.Configure("", consumerId, transport);
 
@@ -1323,7 +1337,7 @@ void RunFilePathDeliveryCase(
     }
     actual << "}";
     std::ostringstream expected;
-    expected << "{\"selected\":true,\"terminal\":\"execution_success\",\"output_ready\":true";
+    expected << "{\"selected\":true,\"terminal\":\"notch-execution-terminal\",\"output_ready\":true";
     if (routeHandoffApplies)
     {
         expected << ",\"named_route_handoff_ok\":true";
@@ -1422,7 +1436,10 @@ void RunCudaDeliveryCase(
     submit.execute = true;
     submit.broadcast_ws = true;
     submit.AddInput(imageInput);
-    submit.output = cec::OutputRequest::Cuda("image");
+    cec::OutputRequest outputRequest = cec::OutputRequest::Cuda("image");
+    outputRequest.workflow_output_id = "2";
+    outputRequest.consumer_id = consumerId;
+    submit.AddOutput(outputRequest);
 
     ctx.sink.Configure("", consumerId, "cuda");
 
@@ -1632,7 +1649,7 @@ void RunCudaDeliveryCase(
         actual << ",\"diagnostics_error\":" << CaseLogger::Quote(diagnosticsError);
     }
     actual << "}";
-    rec.expectedJson = "{\"selected\":true,\"terminal\":\"execution_success\",\"cuda_status\":true,\"shape_valid\":true,\"device_index_match\":true,\"hash_match\":true}";
+    rec.expectedJson = "{\"selected\":true,\"terminal\":\"notch-execution-terminal\",\"cuda_status\":true,\"shape_valid\":true,\"device_index_match\":true,\"hash_match\":true}";
     rec.actualJson = actual.str();
     rec.result = result;
 
@@ -2016,12 +2033,12 @@ MatrixSummary RunConformance(
     cec::ClientOptions clientOptions;
     clientOptions.client_id = options.clientId;
     clientOptions.http_transport = &http;
-    clientOptions.event_sink = &sink;
+    clientOptions.websocket_transport = &ws;
     cec::Client client(clientOptions);
     ServiceShim shim(client, http, &ws);
 
     // 1. Record the linked-against C++ client facts.
-    cec::CppClientFacts clientFacts = cec::Client::facts();
+    cec::CppClientFacts clientFacts = cec::Client::GetFacts();
     {
         std::ostringstream json;
         json << "{\"record\":\"cpp_client_compatibility_facts\""

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "case_logger.h"
+#include "delivery_event_sink.h"
 #include "delivery_types.h"
 #include "matrix.h"
 
@@ -25,13 +26,14 @@ public:
         const std::string& path = request.path;
         if (path == "/features")
         {
+            const ComfyExtensionClient::CppClientFacts facts = ComfyExtensionClient::Client::GetFacts();
             response.status_code = 200;
             response.body =
                 "{\"extension\":{\"notch\":{"
                 "\"plugin_version\":\"0.3.0\","
-                "\"protocol_version\":\"0.3.0\","
-                "\"supports_protocol\":\">=0.3.0,<0.4.0\","
-                "\"minimum_client_protocol\":\"0.3.0\","
+                "\"protocol_version\":\"" + facts.protocol_version.ToString() + "\","
+                "\"supports_protocol\":\"" + facts.supports_protocol.ToString() + "\","
+                "\"minimum_client_protocol\":\"" + facts.protocol_version.ToString() + "\","
                 "\"plugin_capabilities\":[\"http-output\",\"disk-output\",\"named-routes\"],"
                 "\"tested_comfyui_refs\":[\"v0.23.0\"],"
                 "\"cuda_device_index\":-1,"
@@ -114,6 +116,48 @@ int main()
     StubHttp http;
     StubProbe ws;
     notch_mock::CaseLogger logger("stub-out");
+
+    // Only a prompt-matched Notch terminal may complete a delivery case.
+    {
+        ComfyExtensionClient::ClientOptions clientOptions;
+        ComfyExtensionClient::Client client(clientOptions);
+        notch_mock::FacadeLog log(logger, "terminal-events");
+        notch_mock::DeliveryRunState state;
+        notch_mock::DeliveryEventSink sink(state, log);
+        sink.Configure("expected-prompt", "consumer", "http");
+        const char* statuses[] = {"success", "error", "interrupted"};
+        for (int i = 0; i < 3; ++i)
+        {
+            state = notch_mock::DeliveryRunState();
+            const std::string frame = std::string("{\"type\":\"notch-execution-terminal\",\"data\":{") +
+                "\"prompt_id\":\"expected-prompt\",\"status\":\"" + statuses[i] + "\"}}";
+            ComfyExtensionClient::Result<ComfyExtensionClient::ClientEvent> event = client.HandleWebSocketText(frame);
+            if (!event)
+            {
+                std::printf("terminal event parsing failed\n");
+                return 1;
+            }
+            sink.OnEvent(event.Value());
+            if (state.terminalType != "notch-execution-terminal" || state.terminalSuccess != (i == 0))
+            {
+                std::printf("terminal status handling failed: %s\n", statuses[i]);
+                return 1;
+            }
+        }
+        state = notch_mock::DeliveryRunState();
+        ComfyExtensionClient::ClientEvent unrelated;
+        unrelated.kind = ComfyExtensionClient::EventKind::ExecutionTerminal;
+        unrelated.prompt_id = "other-prompt";
+        unrelated.terminal_status = "success";
+        sink.OnEvent(unrelated);
+        unrelated.prompt_id.clear();
+        sink.OnEvent(unrelated);
+        if (!state.terminalType.empty() || state.terminalSuccess)
+        {
+            std::printf("unrelated terminal completed the delivery case\n");
+            return 1;
+        }
+    }
 
     notch_mock::MatrixOptions options;
     options.phase = notch_mock::Phase::Negotiation;

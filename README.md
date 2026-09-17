@@ -41,6 +41,9 @@ remote HTTP byte delivery and hard rejection of unreachable disk/CUDA requests.
 ## Runner Model
 
 Use a self-hosted runner with Docker installed and the Docker engine running.
+On Windows with Docker Desktop, run the runner under the user account that
+started Docker Desktop. A runner service using `NETWORK SERVICE` cannot access
+the Docker engine's named pipe.
 For CUDA tests, install the NVIDIA driver and NVIDIA Container Toolkit so Docker
 can run containers with:
 
@@ -106,7 +109,8 @@ checks on a floating branch.
 | `docker_no_cache` | `false` | Build with `--no-cache`. |
 | `artifact_dir` | `notch-contract-artifacts` | Artifact directory under the caller workspace. |
 | `uv_cache_dir` | `notch-contract-uv-cache` | Shared uv package cache under the runner workspace, mounted at `/cache/uv` and reused across jobs and between runs. |
-| `upload_artifacts` | `true` | Upload artifacts with `actions/upload-artifact`. |
+| `upload_artifacts` | `true` | Attempt to upload diagnostics with `actions/upload-artifact`; upload failures do not change the test result. |
+| `artifact_retention_days` | `1` | Number of days to retain uploaded diagnostics. |
 | `expected_node_classes` | `NotchSingleInput,NotchOutputNode` | Comma-separated `/object_info` keys to assert. Spout is Windows-only and not part of the Linux Docker extension-boot expectation. |
 
 ## Artifacts
@@ -134,11 +138,21 @@ The action writes artifacts under `artifact_dir` and uploads them by default:
 - `conformance-result.json` when `mode` is `protocol_negotiation`, `delivery_local`, or `delivery_remote`
 - `compatibility-result.json`
 
+Uploads are best effort, so a full artifact store does not block later test jobs.
+The command logs and job summaries remain available when uploads fail. Delivery
+checks use prompt-matched `notch-execution-terminal` events and acknowledge
+durable events after applying them to the test state.
+
 `compatibility-result.json` is the file to use when promoting a
 last-known-good ComfyUI version. Promotion should be a separate manual workflow
 step in the caller repo, not automatic behavior inside this action.
 
 ## Local Development
+
+The manually dispatched stub workflow tests against the extension's `master`
+branch by default. For a private extension repository, configure the
+`EXTENSION_READ_TOKEN` repository secret with read-only contents access to that
+repository; the action repository's default token cannot read another private repo.
 
 From this repo:
 

@@ -70,6 +70,10 @@ inputs:
     description: "Upload artifact_dir with actions/upload-artifact."
     required: false
     default: "true"
+  artifact_retention_days:
+    description: "Days to retain uploaded diagnostic artifacts. Upload failures do not change the test result."
+    required: false
+    default: "1"
   expected_node_classes:
     description: "Comma-separated Notch node classes expected in /object_info."
     required: false
@@ -396,7 +400,9 @@ runs:
 
     - name: "[Docker] Upload contract artifacts"
       if: ${{ inputs.upload_artifacts == 'true' && always() }}
+      continue-on-error: true
       uses: actions/upload-artifact@v6
       with:
         name: notch-contract-${{ inputs.mode }}-${{ github.run_id }}
         path: ${{ github.workspace }}/${{ inputs.artifact_dir }}
+        retention-days: ${{ inputs.artifact_retention_days }}

@@ -31,11 +31,8 @@ common=(-std=c++14 -Wall -Wextra
 # compile_check links the same sources the iface CMakeLists builds.
 iface_sources=(
   "$iface/src/client.cpp"
-  "$iface/src/client_interface.cpp"
-  "$iface/src/client_interface_values.cpp"
   "$iface/src/contract.cpp"
-  "$iface/src/protocol_current.cpp"
-  "$iface/src/protocol_v0_3.cpp"
+  "$iface/src/protocol_codec.cpp"
   "$iface/src/types.cpp"
   "$iface/third_party/jsonxx/jsonxx.cc"
 )
@@ -50,6 +47,7 @@ echo "== conformance stub self-test =="
 g++ "${common[@]}" \
   "$mock_root/tests/stub_check.cpp" "$mock_root/src/matrix.cpp" "$mock_root/src/case_logger.cpp" \
   "$mock_root/src/facade_log.cpp" "$mock_root/src/delivery_event_sink.cpp" \
+  "$mock_root/src/service_shim.cpp" \
   "$mock_root/src/hash_utils.cpp" "$mock_root/src/delivery_types.cpp" \
   "$mock_root/src/verify/verify_byte_exact.cpp" "$mock_root/src/verify/verify_integrity.cpp" \
   "$mock_root/src/verify/verify_structural.cpp" \
