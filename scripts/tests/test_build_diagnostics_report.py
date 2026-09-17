@@ -404,6 +404,19 @@ def test_transfer_totals_use_all_eight_samples_in_sequence():
     assert group["repeat_total_ms"] == 40
     assert group["repeat_per_image_ms"] == 5
     assert group["total_bytes"] == 192000000
+    assert group["median_ms"] == 45
+    assert (group["min_ms"], group["max_ms"]) == (10, 80)
+    assert group["repeat_median_ms"] == 5
+
+
+def test_transfer_outlier_remains_visible_without_dominating_median():
+    jobs = benchmark_jobs()
+    jobs[0]["cases"][0]["actual"]["transfer"]["duration_ms"] = 8000
+    group = transfer_benchmarks(jobs)[0]
+    assert group["median_ms"] == 45
+    assert group["max_ms"] == 8000
+    assert group["total_ms"] == 8280
+    assert group["per_image_ms"] == 1035
 
 
 def test_shared_memory_timings_and_redundant_remote_http():
@@ -428,6 +441,9 @@ def test_transfer_missing_or_failed_samples_do_not_become_zero():
     group = transfer_benchmarks(jobs)[0]
     assert group["total_ms"] is None
     assert group["repeat_total_ms"] is None
+    assert group["median_ms"] is None
+    assert group["repeat_median_ms"] is None
+    assert group["min_ms"] is None and group["max_ms"] is None
     assert group["samples"][-1]["duration_ms"] is None
     jobs[0]["cases"].pop()
     group = transfer_benchmarks(jobs)[0]

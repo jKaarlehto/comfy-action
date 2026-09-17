@@ -117,9 +117,11 @@ checks on a floating branch.
 
 The self-contained results HTML includes a **4K image transfers** table. Delivery
 jobs send eight distinct 3840×2160 images per usable transport before the small
-functional fixtures. It reports the first image, the average for images 2–8,
-the sum for all eight, milliseconds per image, and immediate rereads. Individual
-samples and payload sizes are available below the table.
+functional fixtures. The main table compares medians and sample ranges, with the
+common payload size shown once above it. Expand the totals to see the first image,
+the average for images 2–8, the sum for all eight, milliseconds per image, and
+immediate rereads. Individual samples remain available; no outliers are discarded.
+Medians reduce outlier influence but do not remove cache or test-order effects.
 
 Only output retrieval is timed: disk open/read, HTTP request/body retrieval into
 host memory, shared-memory read-only open/map/copy/close, or CUDA IPC import/copy/close. Input uploads, workflow execution,

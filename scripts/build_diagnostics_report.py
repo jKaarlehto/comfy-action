@@ -20,6 +20,7 @@ import math
 import os
 import re
 from pathlib import Path
+from statistics import median
 from string import Template
 
 # Canonical pipeline order + human labels (match the workflow job names).
@@ -355,6 +356,10 @@ def transfer_benchmarks(jobs: list[dict]) -> list[dict]:
             "samples": samples,
             "result": "pass" if measured else "skip" if all(s["result"] == "skip" for s in samples) else "incomplete",
             "first_ms": first,
+            "median_ms": median(sample["duration_ms"] for sample in samples) if measured else None,
+            "min_ms": min(sample["duration_ms"] for sample in samples) if measured else None,
+            "max_ms": max(sample["duration_ms"] for sample in samples) if measured else None,
+            "repeat_median_ms": median(sample["repeat_ms"] for sample in samples) if repeated else None,
             "next_seven_per_image_ms": (total - first) / 7 if measured else None,
             "total_ms": total,
             "per_image_ms": total / 8 if measured else None,
