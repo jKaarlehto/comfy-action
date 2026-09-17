@@ -116,6 +116,7 @@ int main(int argc, char** argv)
         options.requiredFilesMissingJson = ReadFile(requiredFilesMissingPath);
     }
     options.assetRoot = assetRoot;
+    options.benchmarkAssetRoot = ArgValue(argc, argv, "--benchmark-asset-root", "");
     options.sourceFilePath = sourceFilePath;
     options.localOutputPath = localOutputPath;
     options.namedRouteId = namedRouteId;

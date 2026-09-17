@@ -1080,7 +1080,8 @@ void RunFilePathDeliveryCase(
     std::vector<uint8_t> sourceBytes;
     if (!inlineInput)
     {
-        sourcePath = !contract.fixtureFile.empty() ? JoinPath(options.assetRoot, contract.fixtureFile)
+        const std::string& assetRoot = benchmarkIndex > 0 ? options.benchmarkAssetRoot : options.assetRoot;
+        sourcePath = !contract.fixtureFile.empty() ? JoinPath(assetRoot, contract.fixtureFile)
                                                    : DefaultSourceFilePath(options);
         std::string fileError;
         if (sourcePath.empty() || !ReadBinaryFile(sourcePath, sourceBytes, fileError))
@@ -2045,7 +2046,8 @@ void RunTopologyCases(DeliveryContext& ctx, const TopologyConfig& topology, bool
     // Transfer samples precede the small functional fixtures. Generation is untimed.
     for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
     {
-        if (descriptor.outputType != "image" || descriptor.verdict != "deliver" || !skipReason.empty())
+        if (descriptor.outputType != "image" || descriptor.verdict != "deliver" || !skipReason.empty() ||
+            ctx.options.benchmarkAssetRoot.empty())
         {
             continue;
         }

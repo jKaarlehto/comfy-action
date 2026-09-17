@@ -30,10 +30,10 @@ DEFAULT_COMFY_PORT = 8188
 DEFAULT_COMFY_SCHEME = "http"
 
 
-def prepare_delivery_assets(source: Path, workdir: Path) -> Path:
+def prepare_benchmark_assets(workdir: Path) -> Path:
     """Eight distinct, deterministic 4K RGB images, outside the read-only checkout."""
     target = workdir / "delivery-assets"
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True)
     width, height = 3840, 2160
     size = width * height * 3  # Row size is already a multiple of four.
     header = struct.pack("<2sIHHI", b"BM", 54 + size, 0, 0, 54)
@@ -1042,7 +1042,9 @@ def main() -> int:
                 "--phase",
                 "delivery-remote",
                 "--asset-root",
-                str(prepare_delivery_assets(workspace / "tests" / "assets" / "round_trip", workdir)),
+                str(workspace / "tests" / "assets" / "round_trip"),
+                "--benchmark-asset-root",
+                str(prepare_benchmark_assets(workdir)),
                 "--server-log",
                 str(artifacts / "server" / "comfyui.log"),
             ]
@@ -1240,7 +1242,9 @@ def main() -> int:
             if conformance_phase == "delivery-local":
                 mock_command += [
                     "--asset-root",
-                    str(prepare_delivery_assets(extension_source / "tests" / "assets" / "round_trip", workdir)),
+                    str(extension_source / "tests" / "assets" / "round_trip"),
+                    "--benchmark-asset-root",
+                    str(prepare_benchmark_assets(workdir)),
                     "--server-log",
                     str(artifacts / "comfyui.log"),
                     "--local-output-path",
