@@ -266,7 +266,7 @@ function transferSection(run) {
   const groups = run.transfer_benchmarks || [];
   body.appendChild(el("p", "meta", "Compare medians: a single unusually fast or slow sample has less influence than on the average. Range shows the fastest and slowest of all eight samples; none are discarded. These are indicative warm-cache timings, not a definitive ranking. Local disk reads recently written files, usually from the OS file cache. Median reporting does not remove cache or test-order effects."));
   const methodLabel = (group) => (group.topology === "local" ? "Local" : "Remote") + " / " +
-    (group.transport === "shm" ? "shared memory" : group.transport === "disk" ? (group.topology === "local" ? "cached file" : "shared disk") : group.transport.toUpperCase());
+    (group.transport === "shm" ? "shared memory" : group.transport === "disk" ? (group.topology === "local" ? "DISK" : "shared disk") : group.transport.toUpperCase());
   const ms = (value) => value == null ? "—" : value.toFixed(2);
   const payloadSizes = new Map();
   for (const group of groups) {
