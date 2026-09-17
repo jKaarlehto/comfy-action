@@ -133,7 +133,8 @@ Disk/HTTP use deterministic RGB noise fixtures delivered as PNG; CUDA uses
 float32 RGBA patterns, so their byte sizes differ. Failed or skipped transfers
 are unavailable, not zero. Incomplete groups do not produce eight-image totals.
 Fixtures are generated inside the temporary container work directory and are
-not uploaded as diagnostics.
+not uploaded as diagnostics. Generated files under `named-routes/` are also
+excluded from uploads; their timings, hashes and case logs remain in the report.
 
 The action writes artifacts under `artifact_dir` and uploads them by default:
 
