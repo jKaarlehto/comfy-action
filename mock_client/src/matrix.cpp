@@ -47,14 +47,14 @@ std::vector<std::string> Sorted(std::vector<std::string> values)
     return values;
 }
 
-// cuda is image-only; every other output type allows disk and http.
+// cuda is image-only; encoded artifacts support disk, http and shared memory.
 std::vector<std::string> ExpectedTypeTransports(const std::string& type)
 {
     if (type == "IMAGE")
     {
-        return {"cuda", "disk", "http"};
+        return {"cuda", "disk", "http", "shm"};
     }
-    return {"disk", "http"};
+    return {"disk", "http", "shm"};
 }
 
 // JSON for an OutputTransportDecision (the shim's negotiation result).
@@ -168,8 +168,16 @@ struct SelectionRow
 // selected" and that the request is not auto-changed. Negatives isolate the one
 // axis that removes the requested transport (type, server, or client), with the
 // other axes permissive, so the row proves that axis alone causes the reject.
-// 5 positives (cuda + disk/http per type class) + 5 negatives.
+// 7 positives (cuda + disk/http/shm per type class) + 7 negatives.
 const SelectionRow kHardRows[] = {
+    {"image-shm-usable", "IMAGE output via shared memory", "A reachable shared-memory request is honored.",
+     "cuda,disk,http,shm", "cuda,disk,http,shm", "disk,http,shm", "shm", true, "shm"},
+    {"nonimage-shm-usable", "Non-image output via shared memory", "Encoded artifact types also support shared memory.",
+     "disk,http,shm", "disk,http,shm", "http,shm", "shm", true, "shm"},
+    {"shm-rejected-by-server", "Unavailable shared memory is rejected", "No silent HTTP downgrade.",
+     "disk,http,shm", "disk,http", "http,shm", "shm", false, ""},
+    {"shm-rejected-by-client", "Unreachable shared memory is rejected", "HTTP reachability does not prove IPC reachability.",
+     "disk,http,shm", "disk,http,shm", "http", "shm", false, ""},
     // Positives — requested-and-usable => selected (maximal fixture).
     {"image-cuda-usable", "IMAGE output — client requests cuda, gets cuda",
      "Positive cuda boundary for IMAGE. cuda is type-allowed, server-available, and client-reachable, so the hard cuda request is honored. Every transport is usable in the fixture, so cuda being chosen over the also-usable disk/http shows the request is honored as-is, not auto-changed.",
@@ -517,7 +525,7 @@ std::vector<std::string> DeliveryServerTransports(const ServerFacts& server)
     for (size_t i = 0; i < server.output_transports.size(); ++i)
     {
         const std::string transport = server.output_transports[i];
-        if (transport == "disk" || transport == "http" || transport == "cuda")
+        if (transport == "disk" || transport == "http" || transport == "cuda" || transport == "shm")
         {
             transports.push_back(transport);
         }
@@ -544,7 +552,13 @@ std::vector<std::string> ClientReachableTransports(
 {
     if (phase != Phase::DeliveryRemote)
     {
-        return std::vector<std::string>{"cuda", "disk", "http"};
+        std::vector<std::string> reachable{"cuda", "disk", "http"};
+        std::string probeError;
+        if (cec::SharedMemoryReader::Probe(server.shared_memory_probe_name, server.shared_memory_probe_token, probeError))
+        {
+            reachable.push_back("shm");
+        }
+        return reachable;
     }
     if (namedRouteDisk && NamedRouteConfiguredForClient(options, server))
     {
@@ -967,6 +981,10 @@ cec::OutputRequest BuildOutputRequest(const std::string& transport, const std::s
                                       const std::string& extension, const MatrixOptions& options,
                                       bool useNamedRouteDisk, const std::string& caseId)
 {
+    if (transport == "shm")
+    {
+        return cec::OutputRequest::SharedMemory(outputType, extension);
+    }
     if (transport == "http")
     {
         return cec::OutputRequest::Http(outputType, extension);
@@ -1222,6 +1240,13 @@ void RunFilePathDeliveryCase(
                 transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
             }
         }
+        else if (transport == "shm")
+        {
+            const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            outputRead = cec::SharedMemoryReader::Read(ctx.state.output, outputBytes, outputError);
+            transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
+            outputPath = ctx.state.output.shm_name;
+        }
         else if (transport == "http")
         {
             // Fetch the artifact through the shim (FetchOutput GETs the url).
@@ -1259,6 +1284,12 @@ void RunFilePathDeliveryCase(
             repeatOk = ReadBinaryFile(outputPath, repeatedBytes, outputError);
             repeatMs = repeatOk ? ElapsedMilliseconds(start) : -1.0;
         }
+        else if (transport == "shm")
+        {
+            const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            repeatOk = cec::SharedMemoryReader::Read(ctx.state.output, repeatedBytes, outputError);
+            repeatMs = repeatOk ? ElapsedMilliseconds(start) : -1.0;
+        }
         else
         {
             cec::Result<GeneratedResult> repeated = ctx.shim.FetchOutput(ctx.state.output);
@@ -1276,6 +1307,16 @@ void RunFilePathDeliveryCase(
     {
         rec.errors.push_back("repeat_transfer_mismatch");
         repeatMs = -1.0;
+    }
+
+    if (transport == "shm" && ctx.state.outputReady)
+    {
+        cec::Result<bool> released = ctx.client.ReleaseSharedMemoryOutput(ctx.state.output);
+        if (!released)
+        {
+            outputRead = false;
+            outputError = released.GetError().message;
+        }
     }
 
     const std::string inputHash = sourceBytes.empty() ? "" : Sha256Bytes(sourceBytes);
@@ -2046,6 +2087,10 @@ void RunTopologyCases(DeliveryContext& ctx, const TopologyConfig& topology, bool
     // Transfer samples precede the small functional fixtures. Generation is untimed.
     for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
     {
+        if (useNamedRouteDisk && descriptor.transport != "disk")
+        {
+            continue;
+        }
         if (descriptor.outputType != "image" || descriptor.verdict != "deliver" || !skipReason.empty() ||
             ctx.options.benchmarkAssetRoot.empty())
         {
@@ -2073,6 +2118,10 @@ void RunTopologyCases(DeliveryContext& ctx, const TopologyConfig& topology, bool
 
     for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
     {
+        if (useNamedRouteDisk && descriptor.transport != "disk")
+        {
+            continue;
+        }
         if (!skipReason.empty())
         {
             RunSkipCase(ctx, descriptor, skipReason);
@@ -2103,7 +2152,19 @@ void RunDeliveryCases(DeliveryContext& ctx)
 
     if (ctx.options.phase == Phase::DeliveryLocal)
     {
-        const TopologyConfig local{"local", server, std::vector<std::string>{"cuda", "disk", "http"}};
+        std::string probeError;
+        const bool probeOk = cec::SharedMemoryReader::Probe(
+            ctx.server.shared_memory_probe_name, ctx.server.shared_memory_probe_token, probeError);
+        CaseRecord probe;
+        probe.caseId = "local.shm.reachability-probe";
+        probe.title = "Shared-memory namespace probe";
+        probe.phase = "delivery-local";
+        probe.result = probeOk && ContainsString(server, "shm") ? "pass" : "fail";
+        probe.actualJson = "{\"reachable\":" + CaseLogger::Bool(probeOk) + "}";
+        if (probe.result == "fail") probe.errors.push_back(probeError.empty() ? "shm_not_advertised" : probeError);
+        ctx.recorder.Record(probe);
+        const TopologyConfig local{"local", server,
+            ClientReachableTransports(ctx.options.phase, false, ctx.options, ctx.server)};
         RunTopologyCases(ctx, local, false, "");
         return;
     }

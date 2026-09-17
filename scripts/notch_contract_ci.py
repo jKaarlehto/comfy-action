@@ -231,6 +231,9 @@ def copy_extension(source: Path, destination: Path) -> None:
     def ignore(_directory: str, names: list[str]) -> set[str]:
         ignored = {
             ".git",
+            ".venv",
+            ".local-work",
+            "docs_untracked",
             ".pytest_cache",
             "__pycache__",
             "build",
@@ -238,7 +241,7 @@ def copy_extension(source: Path, destination: Path) -> None:
             ".mypy_cache",
             ".ruff_cache",
         }
-        return {name for name in names if name in ignored}
+        return {name for name in names if name in ignored or name.startswith("build-")}
 
     shutil.copytree(source, destination, ignore=ignore)
 
@@ -459,6 +462,11 @@ def build_mock_client(runner: CommandRunner, extension_dir: Path, workdir: Path)
     stub = build_dir / "notch_mock_stub_check"
     if stub.exists():
         runner.run([str(stub)], log_name="mock-client-build.log")
+    runner.run(
+        [sys.executable, str(client_dir / "tests/shared_memory_interop.py"),
+         str(build_dir / "comfy_extension_client_build/comfy_extension_client_shared_memory_check")],
+        log_name="shared-memory-interop.log",
+    )
     exe = build_dir / "notch_mock_client"
     if not exe.exists():
         raise MockClientBuildError(

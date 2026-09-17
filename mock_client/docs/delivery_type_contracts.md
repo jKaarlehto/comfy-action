@@ -11,8 +11,12 @@ delivered artifact must be verified. Traced through ComfyUI-Notch source:
 `/notch/inject` writes the value into the prompt's `remote_value`. `NotchSingleInput`
 reads it and parses via `execution_value_parser.get_handler_for_type(type)`. The
 parsed payload flows to the wired `NotchOutputNode` slot, which delivers through
-`services/output_delivery.py` (`DiskOutputDelivery` for disk+http, `CudaOutputDelivery`
+`services/output_delivery/` (`DiskOutputDelivery` for disk+http+shm, `CudaOutputDelivery`
 for cuda).
+
+SHM carries the same encoded artifact bytes as disk/HTTP for all seven types. It copies the retained file into an immutable server-owned segment; the client probes namespace reachability, opens read-only, copies and closes, then explicitly releases after all reads. Verification classes below apply unchanged. It is an output transport, not a new inject/input format or raw tensor path. Eight additional 4K image cases time only open/map/copy/close, including immediate rereads; release, encoding and execution are excluded.
+
+HTTP serves the existing retained artifact without a separate serving copy. A native Comfy save node may still produce its own file independently.
 
 ## Per-type table (confirmed)
 
@@ -20,7 +24,7 @@ for cuda).
 |---|---|---|---|---|---|---|
 | `file_path` | **path string** | `STRING` | `_parse_string` → `str` | `file_path` | `shutil.copy2(src, dest)` — exact byte copy | **byte-exact (SHA-256)** |
 | `file_3d` | **path string** | `FILE_3D` | `_parse_file_3d` → `LoaderRegistry.load(FILE_3D)` → `File3DValue` | `file_3d` | `file_3d.save_to(path)` — **re-serialized by the payload**, not a raw copy | **byte-exact ONLY IF `File3DValue.save_to` is a byte pass-through — UNCONFIRMED; otherwise integrity/structural** |
-| `image` | path string (disk/http); raw f32 buffer (cuda) | `IMAGE` | `_parse_image` → `LoaderRegistry.load(IMAGE)` → tensor | `image` | disk/http: `PIL.save(format=ext)` — **re-encoded** (transcoded); cuda: raw f32 RGBA share | **decoded-image (disk/http, stb_image); cuda-raw (cuda)** |
+| `image` | path string (disk/http/shm); raw f32 buffer (cuda) | `IMAGE` | `_parse_image` → `LoaderRegistry.load(IMAGE)` → tensor | `image` | disk/http/shm: `PIL.save(format=ext)` — **re-encoded** (transcoded); cuda: raw f32 RGBA share | **decoded-image (disk/http/shm, stb_image); cuda-raw (cuda)** |
 | `audio` | path string | `AUDIO` | `_parse_audio` → `LoaderRegistry.load(AUDIO)` → `{waveform, sample_rate}` | `audio` | `write_audio_file` — WAV/PyAV **re-encode** (transcoded) | **integrity** |
 | `video` | path string | `VIDEO` | `_parse_video` → `VideoValue` | `video` | `save_video_file` — mp4 **re-encode** (transcoded) | **integrity** |
 | `mesh` | **path string** | `MESH` | `_parse_mesh` → `file3d_to_mesh(load(FILE_3D))` → `MeshValue(vertices,faces)` | `mesh` | `runtime.save_glb_from_mesh(payload, prefix)` — **writes a GLB binary**, NOT JSON | **structural over GLB (NOT JSON) — see decision below** |
@@ -51,7 +55,7 @@ for cuda).
 
 - **byte-exact** — `file_path` (confirmed `shutil.copy2`). `file_3d` *pending* the
   `save_to` check.
-- **decoded-image** — `image` disk/http via stb_image (dims+channels+sample hash);
+- **decoded-image** — `image` disk/http/shm via stb_image (dims+channels+sample hash);
   tolerates PIL re-encode.
 - **cuda-raw** — `image` cuda (existing path; raw f32 RGBA vs expected pattern).
 - **integrity** — `audio`, `video` (re-encoded; verify the WS `notch-output-ready`

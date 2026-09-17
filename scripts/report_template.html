@@ -262,8 +262,10 @@ function transferSection(run) {
   sec.appendChild(el("h2", null, "4K image transfers · 1 vs 8 images"));
   const body = el("div", "job-body");
   body.appendChild(el("p", "meta", "3840 × 2160 · eight sequential images per method. Timers start only after each output is ready. Workflow execution, input upload, image encoding/decoding, waiting and hash verification are excluded. Eight-image totals sum retrieval time, excluding the gaps between images."));
-  body.appendChild(el("p", "meta", "Disk/HTTP: distinct deterministic RGB noise images, delivered as PNG. CUDA: float32 RGBA, IPC import + copy to host memory. Payloads differ: compare sizes as well as times. Remote tests use containers on this machine, not a WAN. First means the first large output retrieval in that group, not a cold application start; OS caches are not flushed. Rereads immediately fetch each same output again. HTTP opens a connection per request in this harness."));
+  body.appendChild(el("p", "meta", "Disk/HTTP/SHM: distinct deterministic RGB noise images, delivered as PNG. SHM times opening a read-only mapping, copying bytes to the client, and closing it; server file encoding and shared-memory publication are excluded. CUDA: float32 RGBA, IPC import + copy to host memory. Payloads differ: compare sizes as well as times. Remote tests use containers on this machine, not a WAN. First means the first large output retrieval in that group, not a cold application start; OS caches are not flushed. Rereads immediately fetch each same output again. HTTP opens a connection per request in this harness."));
   const groups = run.transfer_benchmarks || [];
+  const methodLabel = (group) => (group.topology === "local" ? "Local" : "Remote") + " / " +
+    (group.transport === "shm" ? "shared memory" : group.topology === "remote-route-disk" && group.transport === "disk" ? "shared disk" : group.transport.toUpperCase());
   const ms = (value) => value == null ? "—" : value.toFixed(2);
   const table = el("table", "transfers");
   const head = el("tr");
@@ -273,7 +275,7 @@ function transferSection(run) {
   const tbody = el("tbody");
   for (const group of groups) {
     const row = el("tr");
-    const label = group.topology + " / " + group.transport.toUpperCase();
+    const label = methodLabel(group);
     row.appendChild(el("td", null, label));
     row.appendChild(el("td", null, group.total_bytes == null ? "—" : (group.total_bytes / 8 / 1048576).toFixed(2)));
     for (const key of ["first_ms", "next_seven_per_image_ms", "total_ms", "per_image_ms", "repeat_total_ms", "repeat_per_image_ms"])
@@ -285,7 +287,7 @@ function transferSection(run) {
   if (!groups.length) body.appendChild(el("p", "empty", "No 4K transfer measurements in these artifacts."));
   for (const group of groups) {
     const details = el("details", "block");
-    details.appendChild(el("summary", null, group.topology + " / " + group.transport.toUpperCase() + " · " + group.result + " · per-image samples"));
+    details.appendChild(el("summary", null, methodLabel(group) + " · " + group.result + " · per-image samples"));
     const samples = el("table", "transfers");
     const heading = el("tr");
     for (const label of ["Image", "MiB", "First fetch ms", "Reread ms", "Result / reason"]) heading.appendChild(el("th", null, label));
@@ -297,7 +299,7 @@ function transferSection(run) {
       samples.appendChild(row);
     }
     const scroll = el("div", "table-scroll"); scroll.appendChild(samples); details.appendChild(scroll); body.appendChild(details);
-    if (group.result !== "pass") body.appendChild(el("p", "meta", group.topology + " / " + group.transport.toUpperCase() + ": unavailable or incomplete; missing timings are not zero. " + [...new Set(group.samples.flatMap(s => s.errors || []))].join(", ")));
+    if (group.result !== "pass") body.appendChild(el("p", "meta", methodLabel(group) + ": unavailable or incomplete; missing timings are not zero. " + [...new Set(group.samples.flatMap(s => s.errors || []))].join(", ")));
   }
   sec.appendChild(body);
   return sec;

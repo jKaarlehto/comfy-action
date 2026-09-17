@@ -33,6 +33,8 @@ struct ServerFacts
     std::vector<std::string> output_transports;
     std::vector<std::string> named_disk_route_ids;
     std::vector<std::string> workflow_sources;
+    std::string shared_memory_probe_name;
+    std::string shared_memory_probe_token;
     int named_disk_route_revision;
     int cuda_device_index;
     int live_editor_default_timeout_ms;

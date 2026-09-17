@@ -406,6 +406,22 @@ def test_transfer_totals_use_all_eight_samples_in_sequence():
     assert group["total_bytes"] == 192000000
 
 
+def test_shared_memory_timings_and_redundant_remote_http():
+    from copy import deepcopy
+
+    jobs = benchmark_jobs()
+    originals = jobs[0]["cases"]
+    cases = []
+    for topology, transport in [("local", "shm"), ("remote-http", "http"), ("remote-route-disk", "http")]:
+        for original in originals:
+            sample = deepcopy(original)
+            sample["id"] = sample["id"].replace("local.image.http", f"{topology}.image.{transport}")
+            cases.append(sample)
+    groups = transfer_benchmarks([{"cases": cases}])
+    assert [(group["topology"], group["transport"]) for group in groups] == [("local", "shm"), ("remote-http", "http")]
+    assert all(group["total_ms"] == 360 for group in groups)
+
+
 def test_transfer_missing_or_failed_samples_do_not_become_zero():
     jobs = benchmark_jobs()
     jobs[0]["cases"][0]["result"] = "skip"

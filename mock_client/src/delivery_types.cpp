@@ -25,9 +25,9 @@ std::vector<std::string> TypeAllowedTransports(const DeliveryTypeContract& type)
 {
     if (type.isImage)
     {
-        return {"cuda", "disk", "http"};
+        return {"cuda", "disk", "http", "shm"};
     }
-    return {"disk", "http"};
+    return {"disk", "http", "shm"};
 }
 
 std::vector<std::string> TopologyReachable(Phase phase)
@@ -36,7 +36,7 @@ std::vector<std::string> TopologyReachable(Phase phase)
     {
         return {"http"};
     }
-    return {"cuda", "disk", "http"};
+    return {"cuda", "disk", "http", "shm"};
 }
 
 namespace
@@ -64,11 +64,11 @@ std::vector<std::string> UsableTransports(const DeliveryTypeContract& type,
 
 std::vector<DeliveryCaseDescriptor> GenerateDeliveryCases(const TopologyConfig& topology)
 {
-    static const char* const kTransports[] = {"cuda", "disk", "http"};  // Σ
+    static const char* const kTransports[] = {"cuda", "disk", "http", "shm"};  // Σ
     std::vector<DeliveryCaseDescriptor> cases;
     for (const DeliveryTypeContract& type : DeliveryTypes())
     {
-        for (const char* const* it = kTransports; it != kTransports + 3; ++it)
+        for (const char* const* it = kTransports; it != kTransports + 4; ++it)
         {
             const std::string transport = *it;
             const bool allowed = Contains(TypeAllowedTransports(type), transport);

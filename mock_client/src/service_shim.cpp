@@ -468,6 +468,12 @@ bool ParseServerFacts(const std::string& json, ServerFacts& facts, std::string& 
         facts.cuda_device_index = static_cast<int>(intValue);
     }
     GetStringArrayField(*factsObject, "output_transports", facts.output_transports);
+    if (factsObject->has<jsonxx::Object>("shared_memory_probe"))
+    {
+        const jsonxx::Object& probe = factsObject->get<jsonxx::Object>("shared_memory_probe");
+        GetStringField(probe, "name", facts.shared_memory_probe_name);
+        GetStringField(probe, "token", facts.shared_memory_probe_token);
+    }
     GetNamedDiskRouteFields(*factsObject, facts.named_disk_route_ids, facts.named_disk_route_revision);
     ParseLiveEditorFacts(
         *factsObject,

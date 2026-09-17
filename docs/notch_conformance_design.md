@@ -88,10 +88,10 @@ CI product:
   reproduce a successful or failed run.
 - In `protocol_negotiation` mode, verify negotiation-axis positives and negatives
   with a C++ mock client linked against the vendored client interface.
-- In `delivery_local` mode, execute real workflows and verify local disk, HTTP,
+- In `delivery_local` mode, execute real workflows and verify local disk, HTTP, shared memory,
   and CUDA delivery evidence.
 - In `delivery_remote` mode, run separate server/client containers and verify
-  remote HTTP delivery, named-route disk delivery, and unreachable disk/CUDA
+  remote HTTP delivery, named-route disk delivery, and unreachable disk/CUDA/shared-memory
   rejection.
 - Keep a record of the last known working ComfyUI tag and runner environment.
 
@@ -224,7 +224,7 @@ CI stand-in for the native service:
    `ServiceShim::FetchOutput()` retrieves HTTP artifacts.
 
 The harness owns only what the codec and shim deliberately do not: the socket
-lifecycle (`Connect`/`DrainReceived`/`Close` — both are threadless), disk reads,
+lifecycle (`Connect`/`DrainReceived`/`Close` — both are threadless), disk reads, shared-memory read-only copy/close,
 and CUDA IPC import. Correlation is asserted in the http delivery case: the
 server must stamp the submitted consumer_id on the delivered notch-output-ready
 event. A semantic trace of every codec/shim action is written to
@@ -340,33 +340,30 @@ transport request.
 Source-of-truth implementation points in `ComfyUI-Notch`:
 
 - `core.data_types.OUTPUT_TYPES_BY_TRANSPORT`: `cuda` is image-only; `disk` and
-  `http` support the artifact/output type set.
+  `http` and `shm` support the artifact/output type set.
 - `services.notch_workflow_graph.get_workflow_outputs(...)`: `/notch/parse`
-  reports connected-output delivery transports from `cuda`, `disk`, and `http`;
+  reports connected-output delivery transports from `cuda`, `disk`, `http`, and `shm`;
   it does not report `noop`.
 - `services.server_capabilities.supported_output_transports()`: feature flags
-  publish `disk`, `http`, and `noop`, plus `cuda` only when CUDA is available.
+  publish `disk` and `http`, `shm` when the server can allocate a probe, and `cuda` only when CUDA is available. `noop` is internal and is not advertised.
 - `services.output_config_service.build_notch_output_config(...)`: the server
   hard-errors type/transport mismatches and unavailable CUDA requests.
 - `cpp/comfy_extension_client/src/client_interface.cpp`: the C++ helper performs the
   set intersection and hard requested-transport check.
 
-`noop` is deliberately outside the connected-output permutation matrix. It may
-appear in server feature flags because the node has an internal no-output mode,
-but `/notch/inject` does not accept `noop` as an output delivery transport and
-`/notch/parse` never reports it for a connected `NotchOutputNode`.
+`noop` is an internal no-output mode. Server feature flags and connected-output declarations do not advertise it, and `/notch/inject` does not accept it as a delivery transport.
 
 Live `/parse` type-axis assertions:
 
 | Output type | Expected `outputs[].transports` |
 |---|---|
-| `IMAGE` | `cuda,disk,http` |
-| `FILE_3D_GLB` and other `FILE_3D_*` subtypes | `disk,http` |
-| `FILE_3D` | `disk,http` |
-| `FILE_PATH` | `disk,http` |
-| `AUDIO`, `VIDEO`, `MESH`, `LOAD3D_CAMERA` | `disk,http` |
+| `IMAGE` | `cuda,disk,http,shm` |
+| `FILE_3D_GLB` and other `FILE_3D_*` subtypes | `disk,http,shm` |
+| `FILE_3D` | `disk,http,shm` |
+| `FILE_PATH` | `disk,http,shm` |
+| `AUDIO`, `VIDEO`, `MESH`, `LOAD3D_CAMERA` | `disk,http,shm` |
 
-Pure selection matrix, using a hard requested transport:
+Pure selection matrix, using a hard requested transport (the original rows below plus four SHM boundaries: image/non-image success, unavailable server, unreachable client):
 
 | Case | Type-allowed | Server-available | Client-reachable | Requested | Usable set | Expected |
 |---|---|---|---|---|---|---|
@@ -414,10 +411,10 @@ Use two implementation stages:
    verifies that the extension's advertised workflow/type axis, server
    deployment facts, and client reachability negotiation agree.
 2. **Delivery round-trip.** Use `/notch/inject`, WebSocket lifecycle capture,
-   `NotchSingleInput` fixture values, `NotchOutputNode` delivery, disk/HTTP/CUDA
+   `NotchSingleInput` fixture values, `NotchOutputNode` delivery, disk/HTTP/shared-memory/CUDA
    artifact retrieval, SHA-256 checks, and topology variants. `delivery_local`
-   is single-container disk/HTTP/CUDA. `delivery_remote` is a two-container
-   HTTP-positive plus unreachable disk/CUDA-negative topology. Do not keep a
+   is single-container disk/HTTP/shared-memory/CUDA. `delivery_remote` is a two-container
+   HTTP-positive plus unreachable disk/CUDA/shared-memory-negative topology. Do not keep a
    standalone run-lifecycle check as a prerequisite job; delivery owns execution
    assertions.
 
@@ -549,6 +546,16 @@ Failure categories should be stable strings so reports can be grouped:
 - `required_files_parse_error`
 - `transport_interface_incompatible`
 - `harness_error`
+
+### Shared-memory delivery
+
+The local harness reads `extension.notch.shared_memory_probe` (`name`, `token`, `size`) with `SharedMemoryReader::Probe` before including `shm` in its reachable set. The single-container topology shares the Linux IPC namespace; native Windows readers require the same session and mapping permissions. Windows-to-Linux/WSL and WAN connections cannot use this transport. Remote topology masks exclude SHM even when containers run on one host.
+
+All seven artifact types use `OutputRequest::SharedMemory(type, extension)`. The server first writes the retained artifact, then publishes an immutable segment containing its encoded bytes. `SharedMemoryReader::Read` opens read-only, copies, and closes; the mock client verifies the bytes and reread before `Client::ReleaseSharedMemoryOutput`. Only the server unlinks. Release is idempotent; 300-second expiry and a 512 MiB live-byte budget bound abandoned leases. Allocation failure is explicit and does not fall back to HTTP. Resolve can create a fresh lease from the same exact retained artifact.
+
+Local delivery has 28 functional cases, a SHM reachability probe, and 32 timing samples (eight each for CUDA, disk, HTTP, SHM): 61 cases. Remote delivery has 29 functional cases and 16 timing samples: 45 cases. The named-route topology executes disk cases only; HTTP and unreachable CUDA/SHM are covered once in remote-http. Timing covers retrieval only, excluding encoding, execution, verification and SHM release. CUDA capability skips remain explicit.
+
+HTTP is tested once in `remote-http`; named-route disk is tested in `remote-route-disk`. The former duplicate route-topology HTTP row used identical HTTP retrieval and has been removed. A named route adds only disk capability. HTTP GET serves the retained file directly without making a separate serving copy.
 
 ## Artifacts
 

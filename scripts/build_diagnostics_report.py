@@ -325,7 +325,7 @@ def transfer_benchmarks(jobs: list[dict]) -> list[dict]:
     groups: dict[tuple[str, str], list[dict]] = {}
     for job in jobs:
         for case in job.get("cases", []):
-            match = re.fullmatch(r"(.+)\.image\.(cuda|disk|http)\.benchmark-4k-([1-8])", case["id"])
+            match = re.fullmatch(r"(.+)\.image\.(cuda|disk|http|shm)\.benchmark-4k-([1-8])", case["id"])
             if not match:
                 continue
             topology, transport, index = match.groups()
@@ -340,6 +340,8 @@ def transfer_benchmarks(jobs: list[dict]) -> list[dict]:
 
     result = []
     for (topology, transport), samples in groups.items():
+        if topology == "remote-route-disk" and transport == "http" and ("remote-http", "http") in groups:
+            continue
         samples.sort(key=lambda sample: sample["index"])
         complete = [sample["index"] for sample in samples] == list(range(1, 9))
         measured = complete and all(sample["duration_ms"] is not None for sample in samples)

@@ -26,7 +26,7 @@ Notch node classes and server feature facts.
 discovery + transport-negotiation + readiness-decision cases (Layer 1).
 
 `mode: delivery_local` runs the boot setup and then local delivery cases:
-`NotchSingleInput -> execute -> NotchOutputNode -> disk/http/cuda -> verify`.
+`NotchSingleInput -> execute -> NotchOutputNode -> disk/http/shm/cuda -> verify`.
 Disk and HTTP compare exact SHA-256 bytes for a file-path artifact. CUDA uses a
 deterministic raw-buffer IMAGE input and hashes the imported CUDA shared buffer
 when CUDA and the CUDA reader are available. The job also records CUDA IPC
@@ -36,7 +36,7 @@ distinguish a broken Notch share contract from a raw platform IPC import failure
 
 `mode: delivery_remote` runs a two-container topology: a ComfyUI server
 container plus a mock-client container on a private Docker network. It verifies
-remote HTTP byte delivery and hard rejection of unreachable disk/CUDA requests.
+remote HTTP byte delivery, named-route disk delivery, and hard rejection of unreachable disk/CUDA/shared-memory requests. Shared memory is tested only in the local job after reading the server probe in the same IPC namespace; remote containers do not become SHM-reachable merely by sharing a Docker host.
 
 ## Runner Model
 
@@ -93,7 +93,7 @@ checks on a floating branch.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds Layer-1 discovery + transport-negotiation + readiness. `delivery_local` runs local disk/http/cuda delivery. `delivery_remote` runs the two-container remote delivery topology. |
+| `mode` | `extension_boot` | `extension_boot` runs the boot/node/feature/client compile check. `protocol_negotiation` adds Layer-1 discovery + transport-negotiation + readiness. `delivery_local` runs local disk/http/shm/cuda delivery. `delivery_remote` runs the two-container remote delivery topology. |
 | `comfyui_repository` | `https://github.com/comfyanonymous/ComfyUI.git` | ComfyUI repository URL. |
 | `comfyui_ref` | `v0.23.0` | ComfyUI tag, branch, or commit. Prefer release tags or commits for reproducible compatibility records. |
 | `extension_repository` | empty | Optional `ComfyUI-Notch` repository URL. Empty means use the caller workspace checkout. |
@@ -122,19 +122,23 @@ the sum for all eight, milliseconds per image, and immediate rereads. Individual
 samples and payload sizes are available below the table.
 
 Only output retrieval is timed: disk open/read, HTTP request/body retrieval into
-host memory, or CUDA IPC import/copy/close. Input uploads, workflow execution,
-encoding, waiting, verification and harness logging are excluded. Totals sum
+host memory, shared-memory read-only open/map/copy/close, or CUDA IPC import/copy/close. Input uploads, workflow execution,
+encoding, waiting, verification, shared-memory release, and harness logging are excluded. Totals sum
 retrieval times; they are not wall-clock execution time or a simultaneous batch.
 The first sample is not a cold application start, and filesystem caches are not
 flushed. The HTTP harness opens a connection per request. Remote tests use two
 containers on the same host, not an external network.
 
-Disk/HTTP use deterministic RGB noise fixtures delivered as PNG; CUDA uses
+Disk/HTTP/shared memory use deterministic RGB noise fixtures delivered as PNG; CUDA uses
 float32 RGBA patterns, so their byte sizes differ. Failed or skipped transfers
 are unavailable, not zero. Incomplete groups do not produce eight-image totals.
 Fixtures are generated inside the temporary container work directory and are
 not uploaded as diagnostics. Generated files under `named-routes/` are also
 excluded from uploads; their timings, hashes and case logs remain in the report.
+
+Local shared-memory delivery covers all seven artifact types and eight 4K image samples. The SDK copies the encoded retained file from a server-owned immutable segment, then the harness releases the segment after retrieval and reread. This tests the copy/read path, not diskless encoding. The server retains the normal artifact for replay, expires unreleased segments after 300 seconds, and limits live output bytes to 512 MiB; memory failure is an error without HTTP fallback.
+
+The former `remote-http / HTTP` and `remote-route-disk / HTTP` rows used the same HTTP retrieval code. The named route adds only a disk capability, so the suite now tests HTTP once under `remote-http` and disk under `remote-route-disk`. There is no separate `remote-route-http` transport. HTTP serves the existing retained file without creating an extra serving copy.
 
 The action writes artifacts under `artifact_dir` and uploads them by default:
 

@@ -42,13 +42,13 @@ public:
         }
         if (path == "/notch/parse")
         {
-            // Both type-axis equivalence classes: image (cuda,disk,http) and a
+            // Both type-axis equivalence classes: image (cuda,disk,http,shm) and a
             // non-image FILE_3D output (disk,http).
             response.status_code = 200;
             response.body =
                 "{\"inputs\":[],\"schema\":{},\"outputs\":["
-                "{\"name\":\"image\",\"type\":\"IMAGE\",\"transports\":[\"cuda\",\"disk\",\"http\"]},"
-                "{\"name\":\"mesh\",\"type\":\"FILE_3D_GLB\",\"transports\":[\"disk\",\"http\"]}]}";
+                "{\"name\":\"image\",\"type\":\"IMAGE\",\"transports\":[\"cuda\",\"disk\",\"http\",\"shm\"]},"
+                "{\"name\":\"mesh\",\"type\":\"FILE_3D_GLB\",\"transports\":[\"disk\",\"http\",\"shm\"]}]}";
             return true;
         }
         if (path == "/notch/get-required-files")
@@ -173,8 +173,8 @@ int main()
     std::printf("stub conformance: pass=%d fail=%d skip=%d error=%d\n",
                 summary.passed, summary.failed, summary.skipped, summary.errored);
 
-    // negotiation: 1 protocol-compat + 2 type-axis + 2 readiness + 10 hard + 4 soft + 1 ws = 20.
-    if (!summary.Ok() || summary.passed != 20 || summary.failed != 0)
+    // negotiation: 1 protocol-compat + 2 type-axis + 2 readiness + 14 hard + 4 soft + 1 ws = 24.
+    if (!summary.Ok() || summary.passed != 24 || summary.failed != 0)
     {
         std::printf("stub conformance self-test FAILED\n");
         return 1;
@@ -183,9 +183,9 @@ int main()
 
     // Delivery type-table cardinalities (spec §4): pure set arithmetic, no server.
     {
-        const std::vector<std::string> fullServer = {"cuda", "disk", "http"};
+        const std::vector<std::string> fullServer = {"cuda", "disk", "http", "shm"};
 
-        // local topology: client reaches everything -> image x3 + 6 non-image x2 = 15
+        // local topology: client reaches everything -> image x4 + 6 non-image x3 = 22
         // positives, and 0 reachability rejects (every type-allowed transport is reachable).
         int localPositives = 0;
         int localReachabilityRejects = 0;
@@ -196,12 +196,12 @@ int main()
             localReachabilityRejects +=
                 static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
         }
-        assert(localPositives == 15);
+        assert(localPositives == 22);
         assert(localReachabilityRejects == 0);
 
         // remote-http topology: client reaches only http -> 7 positives (one per type),
-        // and 8 reachability rejects (image: cuda+disk unreachable = 2; each of 6
-        // non-image: disk unreachable = 1).
+        // and 15 reachability rejects (image: cuda+disk+shm unreachable = 3; each of 6
+        // non-image: disk+shm unreachable = 2).
         const std::vector<std::string> httpOnlyClient = {"http"};
         int remotePositives = 0;
         int remoteReachabilityRejects = 0;
@@ -213,10 +213,10 @@ int main()
                 static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
         }
         assert(remotePositives == 7);
-        assert(remoteReachabilityRejects == 8);
+        assert(remoteReachabilityRejects == 15);
 
         // remote-route-disk topology: a matching server/client named route makes
-        // disk reachable again, but cuda remains host-local and unreachable.
+        // disk reachable again, but cuda and shm remain host-local and unreachable.
         const std::vector<std::string> routeDiskClient = {"disk", "http"};
         int remoteRoutePositives = 0;
         int remoteRouteRejects = 0;
@@ -228,14 +228,14 @@ int main()
                 static_cast<int>(notch_mock::TypeAllowedTransports(type).size() - usable.size());
         }
         assert(remoteRoutePositives == 14);
-        assert(remoteRouteRejects == 1);
+        assert(remoteRouteRejects == 8);
     }
 
     // Automatic case generation (spec §4 "the arithmetic is the case set"): the
-    // generated descriptors per topology must total local 21, remote-http 15,
-    // remote-route-disk 15 — purely from the topology x type x transport loop.
+    // generated descriptors per topology must total local 28, remote-http 22,
+    // remote-route-disk 22 — purely from the topology x type x transport loop.
     {
-        const std::vector<std::string> full = {"cuda", "disk", "http"};
+        const std::vector<std::string> full = {"cuda", "disk", "http", "shm"};
         const notch_mock::TopologyConfig local{"local", full, full};
         const notch_mock::TopologyConfig remoteHttp{"remote-http", full, {"http"}};
         const notch_mock::TopologyConfig routeDisk{"remote-route-disk", full, {"disk", "http"}};
@@ -243,11 +243,11 @@ int main()
         const auto localCases = notch_mock::GenerateDeliveryCases(local);
         const auto remoteHttpCases = notch_mock::GenerateDeliveryCases(remoteHttp);
         const auto routeDiskCases = notch_mock::GenerateDeliveryCases(routeDisk);
-        assert(localCases.size() == 21);
-        assert(remoteHttpCases.size() == 15);
-        assert(routeDiskCases.size() == 15);
+        assert(localCases.size() == 28);
+        assert(remoteHttpCases.size() == 22);
+        assert(routeDiskCases.size() == 22);
 
-        // local verdict distribution: 15 deliver positives + 6 type-rejects, no others.
+        // local verdict distribution: 22 deliver positives + 6 type-rejects, no others.
         int deliver = 0, rejectType = 0, other = 0;
         for (const auto& descriptor : localCases)
         {
@@ -258,11 +258,11 @@ int main()
             else
                 ++other;
         }
-        assert(deliver == 15);
+        assert(deliver == 22);
         assert(rejectType == 6);
         assert(other == 0);
 
-        // remote-http: 7 deliver + 8 reject-client (no type-rejects re-tested here).
+        // remote-http: 7 deliver + 15 reject-client (no type-rejects re-tested here).
         int rDeliver = 0, rRejectClient = 0, rRejectType = 0;
         for (const auto& descriptor : remoteHttpCases)
         {
@@ -274,7 +274,7 @@ int main()
                 ++rRejectType;
         }
         assert(rDeliver == 7);
-        assert(rRejectClient == 8);
+        assert(rRejectClient == 15);
         assert(rRejectType == 0);
 
         // ids are self-describing and derived: spot-check a few.
@@ -294,6 +294,6 @@ int main()
     }
 
     std::printf("delivery type-table cardinality assertions OK\n");
-    std::printf("delivery case-generation assertions OK (local=21 remote-http=15 route-disk=15)\n");
+    std::printf("delivery case-generation assertions OK (local=28 remote-http=22 route-disk=22)\n");
     return 0;
 }

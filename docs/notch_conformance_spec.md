@@ -71,9 +71,9 @@ authoritative symbol/section in ComfyUI-Notch (no line numbers — verify by nam
 | # | Axis | Components | Cardinality | Grounded in (ComfyUI-Notch, by symbol) |
 |---|------|-----------|-------------|------------------------------|
 | A0 | Setup / liveness | server wire-compat; WS handshake | 2 (fixed gates) | `core/client_compatibility.py`; `api/websocket.py` |
-| A1 | **Type-allowed (T)** | `image`, `non-image` | 2 | `OUTPUT_TYPES_BY_TRANSPORT` in `core/data_types.py`. The axis exists **only because cuda is image-only**: the output type is what gates whether cuda is an allowed transport at all. So there are exactly two classes — `image` (→ cuda,disk,http) and `non-image` (→ disk,http) — and any concrete non-image type (FILE_3D_GLB, AUDIO, MESH, …) is one fixture realizing the same `non-image` class. |
-| A2 | **Server-available (S)** | no-cuda: `{disk,http}`; cuda: `{cuda,disk,http}` | 2 meaningful classes | `supported_output_transports()` / `notch_feature_facts()` in `services/server_capabilities.py` |
-| A3 | **Client-reachable / locality (C)** | reachable **sets**: `{cuda,disk,http}`, `{disk,http}`, `{http}` | 3 sets (regimes: local / route-disk / http-only) | `features.md` §"The transports"; helper is set-based per §Status "Client-interface set helper" |
+| A1 | **Type-allowed (T)** | `image`, `non-image` | 2 | `OUTPUT_TYPES_BY_TRANSPORT` in `core/data_types.py`. The axis exists **only because cuda is image-only**: the output type is what gates whether cuda is an allowed transport at all. So there are exactly two classes — `image` (→ cuda,disk,http,shm) and `non-image` (→ disk,http,shm) — and any concrete non-image type (FILE_3D_GLB, AUDIO, MESH, …) is one fixture realizing the same `non-image` class. |
+| A2 | **Server-available (S)** | `{disk,http}`, plus independently available `cuda` and `shm` | 4 capability combinations | `supported_output_transports()` / `notch_feature_facts()` in `services/server_capabilities.py` |
+| A3 | **Client-reachable / locality (C)** | local includes verified `shm` and usable CUDA; route-disk `{disk,http}`; http-only `{http}` | 3 regimes, capability-gated local set | `features.md` §"The transports"; helper is set-based per §Status "Client-interface set helper" |
 | A4 | Request mode | `hard`, `soft` | 2 | `notch_mock::SelectOutputTransport` in `mock_client/src/service_shim.cpp` (`required_transport` vs `preference_order`) |
 | A5 | **Deployment-readiness decision** (no execution) | all required files exist vs ≥1 missing | 2 | `/notch/get-required-files` (`api/file_manifest_handler.py`), `file_manifest_service.py`; mock `ServiceShim::GetRequiredFiles` → `RequiredFile.exists` |
 
@@ -85,10 +85,7 @@ deferred to an optional separate policy sub-suite (see §Scope).
 **Key facts that keep the count small (and exact):**
 
 - **A3 is set-based.** The helper never sees "local vs remote" — only the
-  reachable *set* the Notch service computed. The 3 documented regimes collapse
-  to **3 distinct sets**, all already used. So adding locality granularity (e.g.
-  named-route disk) adds **0** selection cases as long as it reuses an existing
-  reachable set. Locality's real cost is in delivery round-trip coverage.
+  reachable *set* the Notch service computed. Deployment regimes and capability probes determine the reachable set. Adding locality granularity adds **0** selection cases only when it reuses an existing reachable set; SHM adds independent server/client exclusion boundaries. Locality's real cost is in delivery round-trip coverage.
 - **`cuda_device_index` is one server fact feeding two axes, not its own axis.**
   The server publishes it (`extension.notch.cuda_device_index`, via
   `notch_feature_facts()`), and two distinct readings come off it:
@@ -116,11 +113,8 @@ deferred to an optional separate policy sub-suite (see §Scope).
   files exist* vs *at least one missing*. The gate is deliberately **not**
   multiplied by output type, transport, regime, or file kind (model vs other
   artifact) — those axes do not change the gate's decision rule.
-- **`noop` is published but not selectable.** `supported_output_transports()`
-  includes `noop` as a server-internal no-output mode, so it can appear in the S
-  facts, but `/notch/inject` does not accept it as a delivery transport and
-  `/notch/parse` never reports it on a connected output. It is therefore excluded
-  from the A2 component set above and never enters `usable`.
+- **`noop` is internal and not selectable.** It is not advertised in server output transports or connected-output declarations, and inject does not accept it.
+- **`shm` requires a namespace probe.** Server availability means it can allocate a probe; client reachability requires reading its exact token. These are independent conditions, not host/IP inference.
 - **The file manifest is the A5 gate, not a feature here.** `embed_file_manifest`
   (embedding the manifest into output metadata post-run) is a separate output
   *feature* and is **out of scope** for this matrix; only the readiness *gate*
@@ -136,16 +130,16 @@ assertions.
 
 ### 3.1 Model
 
-Let **Σ = {cuda, disk, http}** be the selectable delivery transports. (`noop` is
-published in server facts but is not selectable — see §2 — so `noop ∉ Σ`.) A
+Let **Σ = {cuda, disk, http, shm}** be the selectable delivery transports. (`noop` is
+internal and not advertised — see §2 — so `noop ∉ Σ`.) A
 deployment presents three eligibility sets, each `⊆ Σ`, whose **realizable**
 values are exactly (from §2):
 
 | set | realizable values |
 |---|---|
-| **T** type-allowed | image ⟹ `{cuda,disk,http}`; non-image ⟹ `{disk,http}` |
-| **S** server-available | GPU ⟹ `{cuda,disk,http}`; no-GPU ⟹ `{disk,http}` |
-| **C** client-reachable | **deployment regimes:** local ⟹ `{cuda,disk,http}`; route-disk ⟹ `{disk,http}`; http-only ⟹ `{http}`. **Plus client masking** (below). |
+| **T** type-allowed | image ⟹ `{cuda,disk,http,shm}`; non-image ⟹ `{disk,http,shm}` |
+| **S** server-available | `{disk,http}` plus `cuda` if GPU available and `shm` if probe allocation succeeds |
+| **C** client-reachable | **deployment regimes:** local ⟹ `{cuda,disk,http,shm}` after capability/reachability checks; route-disk ⟹ `{disk,http}`; http-only ⟹ `{http}`. **Plus client masking** (below). |
 
 T is fixed by the workflow/output type; S by the server's hardware; C by the
 client's deployment regime. C has one extra realizable source: the client may
@@ -216,7 +210,7 @@ usable → fallback to `usable[0]`.
 one case per class or component (type axis: one per output type class;
 readiness: ready vs ≥1-missing; liveness: wire-compat, WS handshake).
 
-### 3.4 The 10 hard-selection cases, by basis
+### 3.4 The 14 hard-selection cases, by basis
 
 | # | case (id) | transport | formal basis |
 |---|---|---|---|
@@ -231,14 +225,16 @@ readiness: ready vs ≥1-missing; liveness: wire-compat, WS handshake).
 | 9 | `nonimage-http-usable` | http | type equivalence-class representative |
 | 10 | `empty-intersection-fails` | — | defensive: empty branch (non-realizable input) |
 
-So **5 honored + 4 axis-isolated rejects + 1 defensive = 10**. The "MC/DC"
+Shared memory adds four cases: image success, non-image success, server-unavailable rejection, and client-unreachable rejection. SHM is allowed by both type classes, but independently excludable by S and C.
+
+So **7 honored + 6 axis-isolated rejects + 1 defensive = 14**. The "MC/DC"
 property holds for **cuda's predicate** (rows 1–4); disk is the degenerate
 single-free-condition pair (5/6 honored, 7 reject); http is the constant
 predicate (8/9); row 10 is out-of-band robustness, not axis coverage.
 
 ### 3.5 Soft coverage — and a known gap
 
-The canonical order is `cuda > http > disk`. The three soft cases:
+The existing soft-policy examples use `cuda > http > disk`; SHM preference is host policy. The four soft cases:
 
 | case | usable | outcome | branch |
 |---|---|---|---|
@@ -264,33 +260,21 @@ nothing more. So selection stays at the MC/DC-minimal set — minimality is
 **This reasoning does not transfer to delivery.** The delivery layer (§4 Layer 2)
 is real I/O: each `(type × transport × topology)` triple is distinct machinery
 (a real codec/file/GPU-buffer over a real filesystem or socket), so additional
-triples add real coverage and minimality is *not* justified. Layer 2 is
-**currently** a minimal boundary set (one positive per reachable transport per
-topology + the reachability rejects); broadening it toward the full realizable
-`(type × transport × topology)` matrix — every triple a real round-trip with
-byte verification — is the intended direction and is the right place to spend
-extra cases, since CI cost there is dominated by container/server startup, not
-per-case time.
+triples add real coverage and minimality is *not* justified. Layer 2 exercises all seven output types for each live transport. Remote named-route coverage executes only disk cases, because HTTP and unreachable CUDA/SHM are already covered in the remote-http topology.
 
 ## 4. Exact case counts
 
-### Layer 1 — Selection + Discovery (pure; single server; **no execution**) = 20
+### Layer 1 — Selection + Discovery (pure; single server; **no execution**) = 24
 
 | Component | Axes | Count | Derivation |
 |---|---|---|---|
 | Setup / liveness | A0 | 2 | wire-compat + WS handshake |
 | Type-axis discovery (live `/notch/parse`) | A1 | 2 | `|T|` = {image, non-image} |
 | Deployment-readiness decision (live `/notch/get-required-files`; no execution) | A5 | 2 | all required files exist vs ≥1 missing |
-| Hard selection | A1·A2·A3·A4 | 10 | 5 positives + 5 rejects (below) |
+| Hard selection | A1·A2·A3·A4 | 14 | 7 positives + 6 axis rejects + 1 defensive empty intersection |
 | Soft selection | A4 | 4 | canonical order `cuda>http>disk`: top-usable chosen (a/0-skip), http-over-disk when no cuda (a/1-skip), debug-mask forcing disk (a/2-skip), and the no-order-match fallback (c) |
 
-Hard = **10**, derived in §3.4: **5 honored** (cuda image; disk image+non-image;
-http image+non-image) + **4 axis-isolated rejects** (cuda by T, by S, by C; disk
-by C) + **1 defensive empty-branch** case. The 4 cuda/disk rejects are the MC/DC
-independence cases (each flips exactly one condition of `honored(x)`); the empty
-case is **not** an axis reject — by Lemma H (§3.2) `usable` is never empty for a
-realizable input, so it exercises the helper's empty branch on a non-realizable
-input. http has no reject (it is never excludable).
+Hard selection retains the original ten cases and adds SHM image/non-image success plus server and client exclusion. Soft preference policy remains client-owned; these tests do not add a SHM preference to the native Notch service.
 
 ### Layer 2 — Delivery coherence matrix
 
@@ -334,15 +318,11 @@ nearly free.
   - **byte-exact (SHA-256):** `file_path` only — these cases explicitly disable
     optional features, including embedded metadata, so fetched/copied bytes equal
     the staged server file. Metadata-enabled delivery can legitimately change bytes.
-  - **structural:** `file_3d`, `mesh`, `load3d_camera` — these reserialize
-    (`File3D.save_to` re-emits the container, `save_glb_from_mesh` writes a GLB,
-    `save_json_file` writes JSON), so delivered bytes legitimately differ from the
-    upload — verify structurally (valid/parseable container + coherent shape), NOT
-    an exact source hash.
-  - **decoded (dims + dtype + sample hash):** `image`, `audio`, `video` —
-    codec-transcoded; verify decoded shape/type and a deterministic sample.
-- **Transports:** `cuda` (image-only, host-local only), `disk`, `http`.
-- **Topologies → real client-reachable set:** `local` `{cuda,disk,http}`;
+  - **structural:** `file_3d` and `load3d_camera` — verify the serialized container/JSON shape, not an exact source hash.
+  - **decoded image:** `image` — verify dimensions, channels and deterministic pixels after encoding.
+  - **integrity:** `audio`, `video`, `mesh` — verify the nonempty encoded artifact and its supported container/metadata checks; mesh output is GLB, not JSON.
+- **Transports:** `cuda` (image-only, host-local only), `disk`, `http`, `shm` (encoded artifacts, verified shared namespace).
+- **Topologies → real client-reachable set:** `local` `{cuda,disk,http,shm}`;
   `remote-http` `{http}`; `remote-route-disk` `{disk,http}`.
 
 **Per topology, per type:** deliver every transport in `usable(type,topology)`
@@ -350,40 +330,31 @@ nearly free.
 `usable` (negative, rejected before inject); then assert
 `delivered == usable` and `rejected == type-allowed − usable`.
 
-| Topology | usable | positives | coherence rejects | subtotal |
+| Topology | functional cases executed | 4K timing samples | extra checks | total |
 |---|---|---|---|---|
-| `local` | image `{cuda,disk,http}`, non-image `{disk,http}` | image×3 + 6 non-image×2 = **15** | cuda-by-type, one per non-image type = **6** | 21 |
-| `remote-http` | `{http}` | 7 types × http = **7** | disk-unreachable ×7 + cuda-unreachable (image) ×1 = **8** | 15 |
-| `remote-route-disk` | `{disk,http}` (named route) | 7 types × {disk,http} = **14** | cuda-unreachable (image) = **1** | 15 |
-| file-availability gate (runtime) | — | — | missing input file ⇒ run blocked = **1** | 1 |
+| `local` | 22 positives (image×4 + 6 non-image×3) + 6 CUDA type rejects = 28 | 8×4 transports = 32 | SHM reachability probe = 1 | 61 |
+| `remote-http` | HTTP positive×7 + disk/SHM unreachable×7 each + image CUDA unreachable = 22 | HTTP×8 = 8 | — | 30 |
+| `remote-route-disk` | disk positive×7 | disk×8 = 8 | — | 15 |
 
-**Total = 52 enumerated delivery cases.**
+**Live delivery totals: local 61, remote 45.** CUDA delivery and its eight timing samples may explicitly skip on unsupported runners. Failed/skipped retrievals never become zero timings.
 
-**Automatic generation — the arithmetic *is* the case set.** Cases are never
-hand-written. The generator iterates `topology × type × transport` over
-Σ={cuda,disk,http} and classifies each triple by the selection arithmetic, so the
-counts above are a consequence of the loop, not a hand-count:
+The pure `GenerateDeliveryCases` function iterates all four transports for all seven types. It emits CUDA type exclusions only in `local`, producing 28 local and 22 per remote topology. The live named-route runner selects only its seven disk cases: HTTP uses identical retrieval in both remote topologies, and duplicate HTTP positives and CUDA/SHM exclusions provide no new coverage. The report therefore shows remote HTTP once and remote named-route disk once.
 
 ```text
 for topology in [local, remote-http, remote-route-disk]:
   for type in the 7 output types:
-    for X in {cuda, disk, http}:
-      allowed   = X in type-allowed(type)         # cuda iff image
-      server_ok = X in server-available(topology) # GPU runner -> {cuda,disk,http}
-      client_ok = X in client-reachable(topology) # local{c,d,h} http-only{h} route-disk{d,h}
-      usable    = allowed and server_ok and client_ok
-      if usable:           emit POSITIVE(topology, type, X)
-      elif not allowed:    emit REJECT(topology, type, X, axis=type)    # only in `local`
-      elif not server_ok:  emit REJECT(topology, type, X, axis=server)
-      elif not client_ok:  emit REJECT(topology, type, X, axis=client)
+    for X in {cuda, disk, http, shm}:
+      allowed   = X in type-allowed(type)
+      server_ok = X in server-available(topology)
+      client_ok = X in client-reachable(topology)
+      if not allowed and topology != local: continue
+      emit descriptor classified by allowed, server_ok, client_ok
+# Live remote-route-disk executes only descriptors with X == disk.
 ```
 
-The single de-dup rule — **type-axis rejects are emitted only in `local`** — turns
-the raw 21-per-topology product into the curated 22/30: a transport excluded by
-*type* (cuda for a non-image) rejects identically in every topology, so it is
-proved once; rejects by *server* or *client* are topology-specific and emitted per
-topology. This yields exactly `local` 15 + 6 = 21 (+ file-availability gate = 22),
-`remote-http` 7 + 8 = 15, `remote-route-disk` 14 + 1 = 15 → remote total 30.
+SHM availability is capability-gated. The local job must successfully read `extension.notch.shared_memory_probe` (`name`, `token`, `size`) before marking SHM reachable; its explicit probe case fails when that expected local capability is absent. Remote sets omit SHM even when containers share a physical host. Native Windows requires the same session/permissions; Linux requires the same IPC namespace/permissions. Windows-to-Linux/WSL and WAN are excluded.
+
+The server copies each retained encoded artifact into an immutable segment. The SDK opens read-only, copies bytes and closes. After retrieval and immediate reread, the harness calls `ReleaseSharedMemoryOutput`; only the server unlinks. Release is excluded from retrieval timing. Unreleased segments expire after 300 seconds under a 512 MiB live-byte budget; exhaustion fails explicitly without HTTP fallback. Resolving the exact retained artifact can create a fresh lease.
 
 **Self-describing case id (derived, never hand-named):**
 
@@ -430,8 +401,7 @@ set) is then a check over the generated ids, not a separate hand list.
 **Topologies as jobs:**
 
 - **delivery-local** — single container; mock client and ComfyUI share one
-  filesystem and host-local CUDA IPC. Covers the `local` row (21) plus the
-  file-availability runtime gate (1) = 22.
+  filesystem, shared-memory namespace, and host-local CUDA IPC. Covers 28 functional cases, 32 timing samples and one SHM probe = 61.
 - **delivery-remote** — two containers on a private Docker network. Without a
   named route it covers the `remote-http` reachability regime. With a host-backed
   route directory mounted at *different* paths per container (e.g.
@@ -452,28 +422,15 @@ delivery case by the prompt-matched WebSocket terminal event.
 Layer 2 excludes output feature/generation policies (metadata embedding, manifest
 embedding, previews) — out of scope per §Scope.
 
-**Implementation status.** The matrix above is the **target**. Implemented today:
-7 of 52 — `local` disk/http/cuda (3 positives), `remote-http` http positive (1),
-the `remote-http` disk/cuda reachability rejects (2), and `remote-route-disk`
-file-path disk positive (1). The remaining positives (per-type breadth) and the
-per-topology coherence rejects are not yet generated. The
-`delivery-local`/`delivery-remote` cases are not stub-verifiable (they need a
-live server); only the negotiation layer and pure cardinality arithmetic are
-covered by `stub_check`.
+**Implementation status.** All seven output types are covered by the generated functional matrix. Pure negotiation and descriptor cardinalities are stub-verifiable; live delivery additionally requires ComfyUI and the selected topology.
 
 ### Totals (exact)
 
-```
-Layer 1 (selection/discovery/readiness) — fully implemented:
-  2 liveness + 2 type-axis + 2 readiness + 10 hard + 4 soft = 20  (all active)
-
-Layer 2 (delivery coherence matrix) — target 52, implemented 7:
-  target    = 52  (local 21 + file-availability 1 + remote-http 15 + remote-route-disk 15)
-  implemented = 7  (local disk/http/cuda + remote-http http positive + 2 remote rejects
-                    + remote-route-disk file_path disk)
-  capability-skipped at target: cuda cases skip without a GPU
-
-full conformance: Layer 1 = 20 implemented; Layer 2 = 7 of 52 implemented
+```text
+Layer 1: 2 liveness + 2 type-axis + 2 readiness + 14 hard + 4 soft = 24
+Local delivery: 28 functional + 32 timing samples + 1 SHM probe = 61
+Remote delivery: 22 HTTP-topology functional + 7 named-route disk functional
+                 + 8 HTTP timing samples + 8 disk timing samples = 45
 ```
 
 ## 5. Growth rules — how the count changes when behavior grows
@@ -501,7 +458,7 @@ Edit §2, then the tables in `mock_client/` follow:
 | readiness decision (L1) | required files `exists`; client-side "any missing ⇒ not-ready" decision | `api/file_manifest_handler.py`; `file_manifest_service.py`; mock `ServiceShim::GetRequiredFiles` | live (client decision) |
 | hard/soft selection | `usable = T∩S∩C`; client returns not-usable (no downgrade) | mock `SelectOutputTransport` (client-side decision); expected sets from `OUTPUT_TYPES_BY_TRANSPORT`, `supported_output_transports()` | pure helper (server-grounded expectations) |
 | server hard-error (delivery) | an impossible requested transport is **rejected at inject**, not downgraded | `build_notch_output_config` / `assert_transport_available` in `services/output_config_service.py`, `services/server_capabilities.py` | live (delivery only) |
-| delivery round-trip | actual disk/http/cuda delivery + events + byte verification | `services.output_delivery`; `services.cuda_shares`; `notch-output-ready`; `notch-cuda-share-status` | live |
+| delivery round-trip | actual disk/http/shm/cuda delivery + events + byte verification | `services.output_delivery`; `services.cuda_shares`; `notch-output-ready`; `notch-cuda-share-status` | live |
 
 "pure helper" means the case exercises the **C++ interface** logic; its *expected
 values* come from extension source. Delivery cases repeat the same calculation
@@ -512,7 +469,7 @@ execution.
 
 The cases are generated from data, not hand-written per test:
 
-- **Selection** — `mock_client/src/matrix.cpp` `kHardRows` (10) and `kSoftRows`
+- **Selection** — `mock_client/src/matrix.cpp` `kHardRows` (14) and `kSoftRows`
   (4). Each row is one `(typeAllowed, serverAvailable, clientReachable,
   requiredOrPreference, expect)` tuple → one case. Add a row = add a case. Hard
   rows set a single required transport; soft rows pass a preference order — the
@@ -520,8 +477,8 @@ The cases are generated from data, not hand-written per test:
   `clientReachable` to force disk, and `[cuda]` for the fallback case (see
   §Negotiation in ComfyUI-Notch `features.md`).
 - **Type-axis** — one case per output in the `/notch/parse` fixture; expected
-  transports come from `ExpectedTypeTransports()` (image → cuda,disk,http; else →
-  disk,http).
+  transports come from `ExpectedTypeTransports()` (image → cuda,disk,http,shm; else →
+  disk,http,shm).
 - **Readiness** — one case per required-files fixture (`requiredFilesReadyJson`,
   `requiredFilesMissingJson`); gate = "any `exists=false` ⇒ blocked".
 - **Setup/WS** — fixed.
@@ -533,7 +490,7 @@ spec, change the asserted count. Layer 2 (delivery) is *not* stub-verifiable (it
 needs a live server), so it is not covered here. Today:
 
 ```
-stub conformance: pass=20 fail=0 skip=0 error=0   ← Layer 1 exact
+stub conformance: pass=24 fail=0 skip=0 error=0   ← Layer 1 exact
 ```
 
 ### Artifact shape
@@ -576,13 +533,7 @@ also records its negotiation inputs and choice.
 Do not add a permanent standalone execution job. Delivery owns execution
 lifecycle assertions.
 
-**Implemented today:** Layer 1 = **20** (fully implemented, stub-verified);
-Layer 2 = **7 of the 52-case target** delivery matrix (§4): `local`
-disk/http/cuda positives, the `remote-http` http positive, the two
-`remote-http` reachability rejects, and the `remote-route-disk` file-path disk
-positive. The remaining delivery breadth (per-type positives and per-topology
-coherence rejects) is the target in §4, not yet generated. Active counts are
-environment-dependent: cuda delivery skips without a GPU.
+**Implemented today:** Layer 1 = **24**, local delivery = **61**, remote delivery = **45**, with the capability-dependent skips described above. Timing samples are separate from the functional matrix.
 
 ## 9. Delivery Diagnostics — WS assertions and per-case Notch diagnostics
 
