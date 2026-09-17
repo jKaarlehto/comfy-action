@@ -35,3 +35,5 @@ jobs:
     - name: Check runner script syntax
       run: python -m py_compile scripts/notch_contract_ci.py
 
+    - name: Test results report
+      run: python scripts/tests/test_build_diagnostics_report.py

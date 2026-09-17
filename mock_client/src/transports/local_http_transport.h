@@ -3,7 +3,7 @@
 
 #include <string>
 
-#include "comfy_extension_client/client.hpp"
+#include "transports/timed_http_transport.h"
 
 namespace notch_mock
 {
@@ -15,7 +15,7 @@ namespace notch_mock
 //
 // The last request the facade asked us to send is retained so a delivery case
 // can attach the (facade-built) inject body as evidence without re-building it.
-class LocalHttpTransport : public ComfyExtensionClient::HttpTransport
+class LocalHttpTransport : public TimedHttpTransport
 {
 public:
     LocalHttpTransport(const std::string& baseUrl, const std::string& outputRoot);
@@ -28,7 +28,10 @@ public:
     // Client::Submit() this is the inject POST; used only for evidence capture.
     const ComfyExtensionClient::HttpRequest& LastRequest() const { return m_lastRequest; }
 
+    double LastTransferMilliseconds() const override { return m_lastTransferMs; }
+
 private:
+    double m_lastTransferMs = -1.0;
     std::string m_baseUrl;
     std::string m_outputRoot;
     ComfyExtensionClient::HttpRequest m_lastRequest;

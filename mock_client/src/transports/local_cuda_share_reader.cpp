@@ -156,8 +156,6 @@ bool LocalCudaShareReader::ReadShare(
         bytes.clear();
         return false;
     }
-    std::printf("cuda reader: opened share '%s' via runtime api (cudaIpcOpenMemHandle)\n", share.name.c_str());
-    std::fflush(stdout);
     return true;
 }
 

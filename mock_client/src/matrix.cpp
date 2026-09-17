@@ -13,6 +13,7 @@
 #include "delivery_types.h"
 #include "facade_log.h"
 #include "hash_utils.h"
+#include "transports/timed_http_transport.h"
 #include "verify/verify_byte_exact.h"
 #include "verify/verify_integrity.h"
 #include "verify/verify_structural.h"
@@ -608,7 +609,7 @@ std::string BuildRoundTripWorkflowJson(const std::string& inputType, const std::
     return json.str();
 }
 
-std::vector<uint8_t> BuildFloat32RgbPattern(int width, int height)
+std::vector<uint8_t> BuildFloat32RgbPattern(int width, int height, int frame = 0)
 {
     std::vector<uint8_t> bytes;
     bytes.resize(static_cast<size_t>(width * height * 3 * 4));
@@ -617,7 +618,7 @@ std::vector<uint8_t> BuildFloat32RgbPattern(int width, int height)
         for (int x = 0; x < width; ++x)
         {
             const float values[3] = {
-                static_cast<float>(x) / static_cast<float>(width - 1),
+                static_cast<float>((x + frame) % width) / static_cast<float>(width - 1),
                 static_cast<float>(y) / static_cast<float>(height - 1),
                 static_cast<float>((x + y) % width) / static_cast<float>(width - 1),
             };
@@ -635,7 +636,7 @@ std::vector<uint8_t> BuildFloat32RgbPattern(int width, int height)
     return bytes;
 }
 
-std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height)
+std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height, int frame = 0)
 {
     std::vector<uint8_t> bytes;
     bytes.resize(static_cast<size_t>(width * height * 4 * 4));
@@ -644,7 +645,7 @@ std::vector<uint8_t> BuildExpectedFloat32RgbaPattern(int width, int height)
         for (int x = 0; x < width; ++x)
         {
             const float values[4] = {
-                static_cast<float>(x) / static_cast<float>(width - 1),
+                static_cast<float>((x + frame) % width) / static_cast<float>(width - 1),
                 static_cast<float>(y) / static_cast<float>(height - 1),
                 static_cast<float>((x + y) % width) / static_cast<float>(width - 1),
                 1.0f,
@@ -1007,6 +1008,26 @@ VerifyResult RunVerifier(const DeliveryTypeContract& contract,
     }
 }
 
+double ElapsedMilliseconds(const std::chrono::steady_clock::time_point& start)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+std::string TransferJson(double firstMs, double repeatMs, size_t bytes, int benchmarkIndex)
+{
+    std::ostringstream json;
+    json << "{\"duration_ms\":" << (firstMs >= 0.0 ? std::to_string(firstMs) : "null")
+         << ",\"repeat_ms\":" << (repeatMs >= 0.0 ? std::to_string(repeatMs) : "null")
+         << ",\"bytes\":" << bytes
+         << ",\"benchmark_index\":" << benchmarkIndex;
+    if (benchmarkIndex > 0)
+    {
+        json << ",\"width\":3840,\"height\":2160,\"image_count\":8";
+    }
+    json << "}";
+    return json.str();
+}
+
 void RunFilePathDeliveryCase(
     DeliveryContext& ctx,
     const std::string& caseId,
@@ -1014,7 +1035,8 @@ void RunFilePathDeliveryCase(
     const std::string& description,
     const std::string& transport,
     bool useNamedRouteDisk,
-    const DeliveryTypeContract* contractPtr)
+    const DeliveryTypeContract* contractPtr,
+    int benchmarkIndex = 0)
 {
     static const DeliveryTypeContract kFilePathContract{
         "file_path", "STRING", "file_path", "", false, VerificationClass::ByteExact};
@@ -1103,10 +1125,13 @@ void RunFilePathDeliveryCase(
     submit.consumer_id = consumerId;
     submit.execute = true;
     submit.broadcast_ws = true;
+    if (contract.outputType == "file_path" || benchmarkIndex > 0)
+    {
+        // Exclude embedded workflow metadata from byte-exact and transfer fixtures.
+        submit.features.Disable(cec::WorkflowFeatureSet::All);
+    }
     if (contract.outputType == "file_path")
     {
-        // Byte-exact delivery excludes metadata that changes the source file.
-        submit.features.Disable(cec::WorkflowFeatureSet::All);
         submit.AddInput(cec::InputValue::String("test_input", sourcePath, contract.inputType));
     }
     else if (inlineInput)
@@ -1164,6 +1189,8 @@ void RunFilePathDeliveryCase(
     std::string outputError;
     bool outputRead = false;
     int outputHttpStatus = 0;
+    double transferMs = -1.0;
+    double repeatMs = -1.0;
     if (ctx.state.outputReady)
     {
         if (transport == "disk")
@@ -1181,19 +1208,25 @@ void RunFilePathDeliveryCase(
                 else
                 {
                     outputPath = JoinPath(options.namedRouteClientRoot, ctx.state.output.relative_path);
+                    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                     outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
+                    transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
                 }
             }
             else
             {
                 outputPath = ctx.state.output.path;
+                const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                 outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
+                transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
             }
         }
         else if (transport == "http")
         {
             // Fetch the artifact through the shim (FetchOutput GETs the url).
             cec::Result<GeneratedResult> fetched = ctx.shim.FetchOutput(ctx.state.output);
+            const TimedHttpTransport* timedHttp = dynamic_cast<const TimedHttpTransport*>(&ctx.http);
+            transferMs = fetched && timedHttp ? timedHttp->LastTransferMilliseconds() : -1.0;
             ctx.facadeLog.Action("fetch_output",
                                  fetched ? ("\"status\":" + std::to_string(fetched.Value().status_code) +
                                             ",\"bytes\":" + std::to_string(fetched.Value().bytes.size()))
@@ -1215,10 +1248,49 @@ void RunFilePathDeliveryCase(
         }
     }
 
+    bool repeatOk = true;
+    if (benchmarkIndex > 0 && outputRead)
+    {
+        std::vector<uint8_t> repeatedBytes;
+        if (transport == "disk")
+        {
+            const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            repeatOk = ReadBinaryFile(outputPath, repeatedBytes, outputError);
+            repeatMs = repeatOk ? ElapsedMilliseconds(start) : -1.0;
+        }
+        else
+        {
+            cec::Result<GeneratedResult> repeated = ctx.shim.FetchOutput(ctx.state.output);
+            const TimedHttpTransport* timedHttp = dynamic_cast<const TimedHttpTransport*>(&ctx.http);
+            repeatOk = static_cast<bool>(repeated);
+            repeatMs = repeatOk && timedHttp ? timedHttp->LastTransferMilliseconds() : -1.0;
+            if (repeated)
+            {
+                repeatedBytes.assign(repeated.Value().bytes.begin(), repeated.Value().bytes.end());
+            }
+        }
+        repeatOk = repeatOk && repeatedBytes == outputBytes;
+    }
+    if (!repeatOk)
+    {
+        rec.errors.push_back("repeat_transfer_mismatch");
+        repeatMs = -1.0;
+    }
+
     const std::string inputHash = sourceBytes.empty() ? "" : Sha256Bytes(sourceBytes);
     const std::string outputHash = outputRead ? Sha256Bytes(outputBytes) : "";
     const VerifyResult verify = outputRead ? RunVerifier(contract, sourceBytes, outputBytes) : VerifyResult{};
-    const bool verifyOk = outputRead && verify.ok;
+    const std::vector<uint8_t> png4kHeader = {
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+        0, 0, 15, 0, 0, 0, 8, 112};
+    const bool benchmarkShapeOk = benchmarkIndex == 0 ||
+        (outputBytes.size() >= png4kHeader.size() &&
+         std::equal(png4kHeader.begin(), png4kHeader.end(), outputBytes.begin()));
+    const bool verifyOk = outputRead && verify.ok && benchmarkShapeOk;
+    if (!benchmarkShapeOk)
+    {
+        rec.errors.push_back("benchmark_image_shape_mismatch");
+    }
     const bool routeHandoffApplies = useNamedRouteDisk && transport == "disk";
     const bool namedRouteHandoffOk = !routeHandoffApplies ||
         (ctx.state.outputReady && ctx.state.output.named_route_id == options.namedRouteId &&
@@ -1264,7 +1336,7 @@ void RunFilePathDeliveryCase(
         diagnosticsFetched ? MissingDiagnosticsEvents(diagnosticsJson, requiredDiagnosticsEvents)
                            : requiredDiagnosticsEvents;
     const bool ok = ctx.state.queued && ctx.state.terminalSuccess && ctx.state.outputReady &&
-                    namedRouteHandoffOk && correlationOk && verifyOk;
+                    namedRouteHandoffOk && correlationOk && verifyOk && repeatOk;
     if (!ctx.state.queued)
     {
         rec.errors.push_back("unexpected_reject");
@@ -1315,6 +1387,7 @@ void RunFilePathDeliveryCase(
            << ",\"prompt_id\":" << CaseLogger::Quote(ctx.state.promptId)
            << ",\"terminal\":" << CaseLogger::Quote(ctx.state.terminalType)
            << ",\"output_ready\":" << CaseLogger::Bool(ctx.state.outputReady)
+           << ",\"transfer\":" << TransferJson(transferMs, repeatMs, outputBytes.size(), benchmarkIndex)
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
            << ",\"output_consumer_id\":" << CaseLogger::Quote(ctx.state.output.consumer_id)
            << ",\"correlation_ok\":" << CaseLogger::Bool(correlationOk)
@@ -1356,7 +1429,8 @@ void RunCudaDeliveryCase(
     DeliveryContext& ctx,
     const std::string& caseId,
     const std::string& title,
-    const std::string& description)
+    const std::string& description,
+    int benchmarkIndex = 0)
 {
     const MatrixOptions& options = ctx.options;
     CaseRecord rec;
@@ -1408,10 +1482,10 @@ void RunCudaDeliveryCase(
         return;
     }
 
-    const int width = 8;
-    const int height = 8;
-    std::vector<uint8_t> imageBytes = BuildFloat32RgbPattern(width, height);
-    std::vector<uint8_t> expectedCudaBytes = BuildExpectedFloat32RgbaPattern(width, height);
+    const int width = benchmarkIndex > 0 ? 3840 : 8;
+    const int height = benchmarkIndex > 0 ? 2160 : 8;
+    std::vector<uint8_t> imageBytes = BuildFloat32RgbPattern(width, height, benchmarkIndex);
+    std::vector<uint8_t> expectedCudaBytes = BuildExpectedFloat32RgbaPattern(width, height, benchmarkIndex);
 
     const std::string consumerId = SafeConsumerId(caseId);
     const std::string workflowJson = BuildRoundTripWorkflowJson("IMAGE", "image");
@@ -1499,7 +1573,24 @@ void RunCudaDeliveryCase(
     const std::string expectedOutputHash = Sha256Bytes(expectedCudaBytes);
     std::vector<uint8_t> cudaBytes;
     std::string cudaReadError;
+    const std::chrono::steady_clock::time_point transferStart = std::chrono::steady_clock::now();
     const bool cudaRead = ctx.state.cudaStatus && ctx.cudaReader->ReadShare(ctx.state.cudaShare, cudaBytes, cudaReadError);
+    const double transferMs = cudaRead ? ElapsedMilliseconds(transferStart) : -1.0;
+    double repeatMs = -1.0;
+    bool repeatOk = true;
+    if (benchmarkIndex > 0 && cudaRead)
+    {
+        std::vector<uint8_t> repeatedBytes;
+        const std::chrono::steady_clock::time_point repeatStart = std::chrono::steady_clock::now();
+        repeatOk = ctx.cudaReader->ReadShare(ctx.state.cudaShare, repeatedBytes, cudaReadError);
+        repeatMs = repeatOk ? ElapsedMilliseconds(repeatStart) : -1.0;
+        repeatOk = repeatOk && repeatedBytes == cudaBytes;
+        if (!repeatOk)
+        {
+            rec.errors.push_back("repeat_transfer_mismatch");
+            repeatMs = -1.0;
+        }
+    }
     const std::string outputHash = cudaRead ? Sha256Bytes(cudaBytes) : "";
     const bool hashMatch = cudaRead && outputHash == expectedOutputHash;
     const bool shapeOk = ctx.state.cudaStatus && ctx.state.cudaShare.width == width &&
@@ -1587,7 +1678,7 @@ void RunCudaDeliveryCase(
         {
             rec.errors.push_back("output_hash_mismatch");
         }
-        result = (shareContractOk && cudaRead && hashMatch) ? "pass" : "fail";
+        result = (shareContractOk && cudaRead && hashMatch && repeatOk) ? "pass" : "fail";
     }
 
     std::ostringstream hashes;
@@ -1612,6 +1703,8 @@ void RunCudaDeliveryCase(
            << ",\"queued\":" << CaseLogger::Bool(ctx.state.queued)
            << ",\"prompt_id\":" << CaseLogger::Quote(ctx.state.promptId)
            << ",\"terminal\":" << CaseLogger::Quote(ctx.state.terminalType)
+           << ",\"output_type\":\"image\""
+           << ",\"transfer\":" << TransferJson(transferMs, repeatMs, cudaBytes.size(), benchmarkIndex)
            << ",\"cuda_status\":" << CaseLogger::Bool(ctx.state.cudaStatus)
            << ",\"cuda_info_get\":" << CaseLogger::Bool(infoOk)
            << ",\"handle_integrity_ok\":" << CaseLogger::Bool(handleIntegrityOk)
@@ -1949,6 +2042,33 @@ void RunSkipCase(DeliveryContext& ctx, const DeliveryCaseDescriptor& descriptor,
 void RunTopologyCases(DeliveryContext& ctx, const TopologyConfig& topology, bool useNamedRouteDisk,
                       const std::string& skipReason)
 {
+    // Transfer samples precede the small functional fixtures. Generation is untimed.
+    for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
+    {
+        if (descriptor.outputType != "image" || descriptor.verdict != "deliver" || !skipReason.empty())
+        {
+            continue;
+        }
+        for (int imageIndex = 1; imageIndex <= 8; ++imageIndex)
+        {
+            const std::string caseId = topology.name + ".image." + descriptor.transport +
+                ".benchmark-4k-" + std::to_string(imageIndex);
+            const std::string title = "4K image " + std::to_string(imageIndex) + "/8 via " + descriptor.transport;
+            if (descriptor.transport == "cuda")
+            {
+                RunCudaDeliveryCase(ctx, caseId, title, "4K raw RGBA import and host copy; immediate reread.", imageIndex);
+            }
+            else
+            {
+                DeliveryTypeContract contract = *descriptor.type;
+                contract.fixtureFile = "benchmark-4k-" + std::to_string(imageIndex) + ".bmp";
+                RunFilePathDeliveryCase(ctx, caseId, title,
+                    "Distinct 3840x2160 RGB image; output retrieval and immediate reread only.",
+                    descriptor.transport, useNamedRouteDisk, &contract, imageIndex);
+            }
+        }
+    }
+
     for (const DeliveryCaseDescriptor& descriptor : GenerateDeliveryCases(topology))
     {
         if (!skipReason.empty())

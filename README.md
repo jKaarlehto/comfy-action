@@ -115,6 +115,26 @@ checks on a floating branch.
 
 ## Artifacts
 
+The self-contained results HTML includes a **4K image transfers** table. Delivery
+jobs send eight distinct 3840×2160 images per usable transport before the small
+functional fixtures. It reports the first image, the average for images 2–8,
+the sum for all eight, milliseconds per image, and immediate rereads. Individual
+samples and payload sizes are available below the table.
+
+Only output retrieval is timed: disk open/read, HTTP request/body retrieval into
+host memory, or CUDA IPC import/copy/close. Input uploads, workflow execution,
+encoding, waiting, verification and harness logging are excluded. Totals sum
+retrieval times; they are not wall-clock execution time or a simultaneous batch.
+The first sample is not a cold application start, and filesystem caches are not
+flushed. The HTTP harness opens a connection per request. Remote tests use two
+containers on the same host, not an external network.
+
+Disk/HTTP use deterministic RGB noise fixtures delivered as PNG; CUDA uses
+float32 RGBA patterns, so their byte sizes differ. Failed or skipped transfers
+are unavailable, not zero. Incomplete groups do not produce eight-image totals.
+Fixtures are generated inside the temporary container work directory and are
+not uploaded as diagnostics.
+
 The action writes artifacts under `artifact_dir` and uploads them by default:
 
 - `comfyui.log`

@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import platform
+import random
+import struct
 import re
 import shutil
 import shlex
@@ -26,6 +28,20 @@ NOTCH_NODE_CLASSES = ["NotchSingleInput", "NotchOutputNode"]
 DEFAULT_COMFY_LISTEN_ADDRESS = "127.0.0.1"
 DEFAULT_COMFY_PORT = 8188
 DEFAULT_COMFY_SCHEME = "http"
+
+
+def prepare_delivery_assets(source: Path, workdir: Path) -> Path:
+    """Eight distinct, deterministic 4K RGB images, outside the read-only checkout."""
+    target = workdir / "delivery-assets"
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    width, height = 3840, 2160
+    size = width * height * 3  # Row size is already a multiple of four.
+    header = struct.pack("<2sIHHI", b"BM", 54 + size, 0, 0, 54)
+    header += struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, size, 2835, 2835, 0, 0)
+    for index in range(1, 9):
+        pixels = random.Random(4200 + index).randbytes(size)
+        (target / f"benchmark-4k-{index}.bmp").write_bytes(header + pixels)
+    return target
 
 
 class RunnerError(RuntimeError):
@@ -1026,7 +1042,7 @@ def main() -> int:
                 "--phase",
                 "delivery-remote",
                 "--asset-root",
-                str(workspace / "tests" / "assets" / "round_trip"),
+                str(prepare_delivery_assets(workspace / "tests" / "assets" / "round_trip", workdir)),
                 "--server-log",
                 str(artifacts / "server" / "comfyui.log"),
             ]
@@ -1224,7 +1240,7 @@ def main() -> int:
             if conformance_phase == "delivery-local":
                 mock_command += [
                     "--asset-root",
-                    str(extension_source / "tests" / "assets" / "round_trip"),
+                    str(prepare_delivery_assets(extension_source / "tests" / "assets" / "round_trip", workdir)),
                     "--server-log",
                     str(artifacts / "comfyui.log"),
                     "--local-output-path",

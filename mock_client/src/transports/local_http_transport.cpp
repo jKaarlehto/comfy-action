@@ -1,5 +1,6 @@
 #include "transports/local_http_transport.h"
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
 
@@ -21,6 +22,7 @@ bool LocalHttpTransport::Send(const ComfyExtensionClient::HttpRequest& request,
 {
     m_lastRequest = request;
 
+    const std::chrono::steady_clock::time_point transferStart = std::chrono::steady_clock::now();
     ix::HttpClient client(/*async=*/false);
     const std::string url = m_baseUrl + request.path;
 
@@ -48,6 +50,9 @@ bool LocalHttpTransport::Send(const ComfyExtensionClient::HttpRequest& request,
             ok = false;
         }
     }
+
+    m_lastTransferMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - transferStart).count();
 
     std::ostringstream record;
     record << "{\"method\":" << CaseLogger::Quote(request.method)

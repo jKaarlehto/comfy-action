@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
+import re
 from pathlib import Path
 from string import Template
 
@@ -318,6 +320,49 @@ def normalize_job(name: str, label: str, job_dir: Path) -> dict:
     }
 
 
+def transfer_benchmarks(jobs: list[dict]) -> list[dict]:
+    """Keep incomplete/failed measurements out of the eight-image totals."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for job in jobs:
+        for case in job.get("cases", []):
+            match = re.fullmatch(r"(.+)\.image\.(cuda|disk|http)\.benchmark-4k-([1-8])", case["id"])
+            if not match:
+                continue
+            topology, transport, index = match.groups()
+            actual = case.get("actual") or {}
+            transfer = actual.get("transfer") or {}
+            sample = {"index": int(index), "result": case.get("result"), "errors": case.get("errors", [])}
+            for key in ("duration_ms", "repeat_ms", "bytes"):
+                value = transfer.get(key)
+                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+                sample[key] = value if valid and case.get("result") == "pass" else None
+            groups.setdefault((topology, transport), []).append(sample)
+
+    result = []
+    for (topology, transport), samples in groups.items():
+        samples.sort(key=lambda sample: sample["index"])
+        complete = [sample["index"] for sample in samples] == list(range(1, 9))
+        measured = complete and all(sample["duration_ms"] is not None for sample in samples)
+        repeated = complete and all(sample["repeat_ms"] is not None for sample in samples)
+        total = sum(sample["duration_ms"] for sample in samples) if measured else None
+        repeat_total = sum(sample["repeat_ms"] for sample in samples) if repeated else None
+        first = next((sample["duration_ms"] for sample in samples if sample["index"] == 1), None)
+        result.append({
+            "topology": topology,
+            "transport": transport,
+            "samples": samples,
+            "result": "pass" if measured else "skip" if all(s["result"] == "skip" for s in samples) else "incomplete",
+            "first_ms": first,
+            "next_seven_per_image_ms": (total - first) / 7 if measured else None,
+            "total_ms": total,
+            "per_image_ms": total / 8 if measured else None,
+            "repeat_total_ms": repeat_total,
+            "repeat_per_image_ms": repeat_total / 8 if repeated else None,
+            "total_bytes": sum(sample["bytes"] for sample in samples) if measured and all(s["bytes"] is not None for s in samples) else None,
+        })
+    return result
+
+
 def aggregate_run(jobs: dict, run_meta: dict | None = None) -> dict:
     """Combine per-job (label, dir) entries into one normalized run dict."""
     normalized = [normalize_job(name, label, Path(job_dir)) for name, (label, job_dir) in jobs.items()]
@@ -367,6 +412,7 @@ def aggregate_run(jobs: dict, run_meta: dict | None = None) -> dict:
         "run": run,
         "summary": summary,
         "jobs": normalized,
+        "transfer_benchmarks": transfer_benchmarks(normalized),
     }
 
 

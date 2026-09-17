@@ -67,6 +67,12 @@
   table.kv { border-collapse: collapse; font-size: 12px; }
   table.kv td { border: 1px solid var(--line); padding: 3px 8px; }
   table.kv td:first-child { color: var(--muted); }
+  .table-scroll { overflow-x: auto; }
+  table.transfers { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.transfers th, table.transfers td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  table.transfers th { color: var(--muted); font-weight: 500; }
+  table.transfers th:first-child, table.transfers td:first-child { text-align: left; }
+  table.transfers td strong { color: var(--info); }
   .hidden { display: none !important; }
   .empty { color: var(--muted); font-style: italic; }
   a { color: var(--info); }
@@ -241,10 +247,58 @@ function jobSection(job) {
   return sec;
 }
 
+function transferSection(run) {
+  const sec = el("section", "job");
+  sec.id = "transfer-benchmark";
+  sec.appendChild(el("h2", null, "4K image transfers · 1 vs 8 images"));
+  const body = el("div", "job-body");
+  body.appendChild(el("p", "meta", "3840 × 2160 · eight sequential images per method. Timers start only after each output is ready. Workflow execution, input upload, image encoding/decoding, waiting and hash verification are excluded. Eight-image totals sum retrieval time, excluding the gaps between images."));
+  body.appendChild(el("p", "meta", "Disk/HTTP: distinct deterministic RGB noise images, delivered as PNG. CUDA: float32 RGBA, IPC import + copy to host memory. Payloads differ: compare sizes as well as times. Remote tests use containers on this machine, not a WAN. First means the first large output retrieval in that group, not a cold application start; OS caches are not flushed. Rereads immediately fetch each same output again. HTTP opens a connection per request in this harness."));
+  const groups = run.transfer_benchmarks || [];
+  const ms = (value) => value == null ? "—" : value.toFixed(2);
+  const table = el("table", "transfers");
+  const head = el("tr");
+  for (const label of ["Topology / method", "MiB / image", "1st image ms", "Next 7 ms / img", "8 total ms", "8 ms / img", "Reread 8 ms", "Reread ms / img"])
+    head.appendChild(el("th", null, label));
+  const thead = el("thead"); thead.appendChild(head); table.appendChild(thead);
+  const tbody = el("tbody");
+  for (const group of groups) {
+    const row = el("tr");
+    const label = group.topology + " / " + group.transport.toUpperCase();
+    row.appendChild(el("td", null, label));
+    row.appendChild(el("td", null, group.total_bytes == null ? "—" : (group.total_bytes / 8 / 1048576).toFixed(2)));
+    for (const key of ["first_ms", "next_seven_per_image_ms", "total_ms", "per_image_ms", "repeat_total_ms", "repeat_per_image_ms"])
+      row.appendChild(el("td", null, ms(group[key])));
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  const wrap = el("div", "table-scroll"); wrap.appendChild(table); body.appendChild(wrap);
+  if (!groups.length) body.appendChild(el("p", "empty", "No 4K transfer measurements in these artifacts."));
+  for (const group of groups) {
+    const details = el("details", "block");
+    details.appendChild(el("summary", null, group.topology + " / " + group.transport.toUpperCase() + " · " + group.result + " · per-image samples"));
+    const samples = el("table", "transfers");
+    const heading = el("tr");
+    for (const label of ["Image", "MiB", "First fetch ms", "Reread ms", "Result / reason"]) heading.appendChild(el("th", null, label));
+    samples.appendChild(heading);
+    for (const sample of group.samples) {
+      const row = el("tr");
+      for (const value of [sample.index, sample.bytes == null ? "—" : (sample.bytes / 1048576).toFixed(2), ms(sample.duration_ms), ms(sample.repeat_ms), [sample.result, ...(sample.errors || [])].join(" · ")])
+        row.appendChild(el("td", null, String(value)));
+      samples.appendChild(row);
+    }
+    const scroll = el("div", "table-scroll"); scroll.appendChild(samples); details.appendChild(scroll); body.appendChild(details);
+    if (group.result !== "pass") body.appendChild(el("p", "meta", group.topology + " / " + group.transport.toUpperCase() + ": unavailable or incomplete; missing timings are not zero. " + [...new Set(group.samples.flatMap(s => s.errors || []))].join(", ")));
+  }
+  sec.appendChild(body);
+  return sec;
+}
+
 function render(run) {
   headStatus(run);
   const report = document.getElementById("report");
   report.innerHTML = "";
+  report.appendChild(transferSection(run));
   if (!run.jobs || !run.jobs.length) { report.appendChild(el("div", "empty", "no job artifacts found")); }
   else for (const job of run.jobs) report.appendChild(jobSection(job));
   document.getElementById("raw-json").textContent = pretty(run);

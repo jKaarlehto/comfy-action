@@ -15,6 +15,7 @@ from build_diagnostics_report import (  # noqa: E402
     render_report,
     render_run_markdown,
     truncate_log,
+    transfer_benchmarks,
 )
 from write_context_artifact import write_docker_preflight_artifact, write_metadata_artifact  # noqa: E402
 
@@ -384,6 +385,48 @@ def test_full_build_from_fixture_root(tmp_path=None):
     assert os.path.getsize(out) > 0
     body = open(out, encoding="utf-8").read()
     assert "local.image.cuda.deliver" in body  # case id reachable in the document
+
+
+def benchmark_jobs():
+    return [{"cases": [{
+        "id": f"local.image.http.benchmark-4k-{index}",
+        "result": "pass", "errors": [],
+        "actual": {"transfer": {"duration_ms": index * 10.0, "repeat_ms": 5.0, "bytes": 24000000}},
+    } for index in range(8, 0, -1)]}]
+
+
+def test_transfer_totals_use_all_eight_samples_in_sequence():
+    group = transfer_benchmarks(benchmark_jobs())[0]
+    assert group["first_ms"] == 10
+    assert group["next_seven_per_image_ms"] == 50
+    assert group["total_ms"] == 360
+    assert group["per_image_ms"] == 45
+    assert group["repeat_total_ms"] == 40
+    assert group["repeat_per_image_ms"] == 5
+    assert group["total_bytes"] == 192000000
+
+
+def test_transfer_missing_or_failed_samples_do_not_become_zero():
+    jobs = benchmark_jobs()
+    jobs[0]["cases"][0]["result"] = "skip"
+    group = transfer_benchmarks(jobs)[0]
+    assert group["total_ms"] is None
+    assert group["repeat_total_ms"] is None
+    assert group["samples"][-1]["duration_ms"] is None
+    jobs[0]["cases"].pop()
+    group = transfer_benchmarks(jobs)[0]
+    assert group["first_ms"] is None
+    assert group["total_ms"] is None
+
+
+def test_transfer_rejects_invalid_times_and_duplicate_indices():
+    for value in (float("nan"), float("inf"), -1, True, "10", None):
+        jobs = benchmark_jobs()
+        jobs[0]["cases"][0]["actual"]["transfer"]["duration_ms"] = value
+        assert transfer_benchmarks(jobs)[0]["total_ms"] is None
+    jobs = benchmark_jobs()
+    jobs[0]["cases"][0]["id"] = jobs[0]["cases"][1]["id"]
+    assert transfer_benchmarks(jobs)[0]["total_ms"] is None
 
 
 if __name__ == "__main__":
