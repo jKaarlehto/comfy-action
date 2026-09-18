@@ -207,7 +207,8 @@ split: the codec-owned surfaces go through `Client`, and the service-owned
 orchestration lives in `notch_mock::ServiceShim` (`service_shim.{h,cpp}`), the
 CI stand-in for the native service:
 
-1. `ServiceShim::Discover()` / `ServiceShim::Connect()` read `/features` facts,
+1. `ServiceShim::Discover()` / `ServiceShim::Connect()` obtain typed facts through
+   `Client::GetServerFacts()`,
    gate protocol compatibility (the semver-range logic the native service
    applies), and announce the client's feature flags on the WebSocket
    (`Client::FeatureFlagsMessage()` over the harness socket).

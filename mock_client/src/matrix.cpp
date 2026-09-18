@@ -289,8 +289,8 @@ OutputTransportRequest MakeTransportRequest(
     OutputTransportRequest request;
     request.output.name = "selection";
     request.output.type = "synthetic";
-    request.output.transports = typeAllowed;
-    request.server.output_transports = serverAvailable;
+    request.output.transports = TransportValues(typeAllowed);
+    request.server.output_transports = TransportValues(serverAvailable);
     request.client_reachable_transports = clientReachable;
     request.preference_order = preferenceOrder;
     request.required_transport = requiredTransport;
@@ -524,7 +524,7 @@ std::vector<std::string> DeliveryServerTransports(const ServerFacts& server)
     std::vector<std::string> transports;
     for (size_t i = 0; i < server.output_transports.size(); ++i)
     {
-        const std::string transport = server.output_transports[i];
+        const std::string transport = cec::OutputTransportName(server.output_transports[i]);
         if (transport == "disk" || transport == "http" || transport == "cuda" || transport == "shm")
         {
             transports.push_back(transport);
@@ -554,7 +554,7 @@ std::vector<std::string> ClientReachableTransports(
     {
         std::vector<std::string> reachable{"cuda", "disk", "http"};
         std::string probeError;
-        if (cec::SharedMemoryReader::Probe(server.shared_memory_probe_name, server.shared_memory_probe_token, probeError))
+        if (cec::SharedMemoryReader::Probe(server.shared_memory_probe.name, server.shared_memory_probe.token, probeError))
         {
             reachable.push_back("shm");
         }
@@ -713,7 +713,14 @@ void WaitForDelivery(DeliveryContext& ctx, const std::string& transport, int tim
             if (event)
             {
                 ctx.sink.OnEvent(event.Value());
-                ctx.client.ConfirmEventApplied(event.Value());
+                if (event.Value().receipt)
+                {
+                    cec::Result<bool> acknowledged = ctx.client.ConfirmDelivery(event.Value().receipt);
+                    if (!acknowledged)
+                    {
+                        ctx.sink.OnParseError(acknowledged.GetError());
+                    }
+                }
             }
             else
             {
@@ -749,11 +756,11 @@ std::string OutputReadyJson(const cec::OutputReady& output)
     json << "{\"name\":" << CaseLogger::Quote(output.name)
          << ",\"consumer_id\":" << CaseLogger::Quote(output.consumer_id)
          << ",\"prompt_id\":" << CaseLogger::Quote(output.prompt_id)
-         << ",\"transport\":" << CaseLogger::Quote(output.transport)
-         << ",\"path\":" << CaseLogger::Quote(output.path)
-         << ",\"named_route_id\":" << CaseLogger::Quote(output.named_route_id)
-         << ",\"relative_path\":" << CaseLogger::Quote(output.relative_path)
-         << ",\"url\":" << CaseLogger::Quote(output.url)
+         << ",\"transport\":" << CaseLogger::Quote(ComfyExtensionClient::OutputTransportName(output.transport))
+         << ",\"path\":" << CaseLogger::Quote(output.disk.path)
+         << ",\"named_route_id\":" << CaseLogger::Quote(output.disk.named_route_id)
+         << ",\"relative_path\":" << CaseLogger::Quote(output.disk.relative_path)
+         << ",\"url\":" << CaseLogger::Quote(output.http.url)
          << ",\"type\":" << CaseLogger::Quote(output.type)
          << ",\"format\":" << CaseLogger::Quote(output.format)
          << ",\"width\":" << output.width
@@ -1216,17 +1223,17 @@ void RunFilePathDeliveryCase(
         {
             if (useNamedRouteDisk)
             {
-                if (ctx.state.output.named_route_id != options.namedRouteId)
+                if (ctx.state.output.disk.named_route_id != options.namedRouteId)
                 {
                     outputError = "named_route_id mismatch";
                 }
-                else if (!IsSafeRelativePath(ctx.state.output.relative_path))
+                else if (!IsSafeRelativePath(ctx.state.output.disk.relative_path))
                 {
                     outputError = "unsafe or empty relative_path";
                 }
                 else
                 {
-                    outputPath = JoinPath(options.namedRouteClientRoot, ctx.state.output.relative_path);
+                    outputPath = JoinPath(options.namedRouteClientRoot, ctx.state.output.disk.relative_path);
                     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                     outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
                     transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
@@ -1234,7 +1241,7 @@ void RunFilePathDeliveryCase(
             }
             else
             {
-                outputPath = ctx.state.output.path;
+                outputPath = ctx.state.output.disk.path;
                 const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                 outputRead = ReadBinaryFile(outputPath, outputBytes, outputError);
                 transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
@@ -1245,7 +1252,7 @@ void RunFilePathDeliveryCase(
             const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
             outputRead = cec::SharedMemoryReader::Read(ctx.state.output, outputBytes, outputError);
             transferMs = outputRead ? ElapsedMilliseconds(start) : -1.0;
-            outputPath = ctx.state.output.shm_name;
+            outputPath = ctx.state.output.shared_memory.name;
         }
         else if (transport == "http")
         {
@@ -1263,7 +1270,7 @@ void RunFilePathDeliveryCase(
                 outputHttpStatus = fetched.Value().status_code;
                 outputBytes.assign(fetched.Value().bytes.begin(), fetched.Value().bytes.end());
                 outputRead = true;
-                outputPath = ctx.state.output.url;
+                outputPath = ctx.state.output.http.url;
             }
             else
             {
@@ -1335,8 +1342,8 @@ void RunFilePathDeliveryCase(
     }
     const bool routeHandoffApplies = useNamedRouteDisk && transport == "disk";
     const bool namedRouteHandoffOk = !routeHandoffApplies ||
-        (ctx.state.outputReady && ctx.state.output.named_route_id == options.namedRouteId &&
-         IsSafeRelativePath(ctx.state.output.relative_path) && ctx.state.output.path.empty());
+        (ctx.state.outputReady && ctx.state.output.disk.named_route_id == options.namedRouteId &&
+         IsSafeRelativePath(ctx.state.output.disk.relative_path) && ctx.state.output.disk.path.empty());
     // Correlation assertion: the server echoes the submitted consumer_id on the
     // notch-output-ready event, so a delivered OutputReady identifies its owner.
     const bool correlationOk = !ctx.state.outputReady || ctx.state.output.consumer_id == consumerId;
@@ -1416,8 +1423,8 @@ void RunFilePathDeliveryCase(
            << ",\"transport\":" << CaseLogger::Quote(transport)
            << ",\"output_type\":" << CaseLogger::Quote(contract.outputType)
            << ",\"path\":" << CaseLogger::Quote(outputPath)
-           << ",\"named_route_id\":" << CaseLogger::Quote(ctx.state.output.named_route_id)
-           << ",\"relative_path\":" << CaseLogger::Quote(ctx.state.output.relative_path)
+           << ",\"named_route_id\":" << CaseLogger::Quote(ctx.state.output.disk.named_route_id)
+           << ",\"relative_path\":" << CaseLogger::Quote(ctx.state.output.disk.relative_path)
            << ",\"bytes\":" << outputBytes.size()
            << ",\"sha256\":" << CaseLogger::Quote(outputHash)
            << ",\"verification\":" << (verify.detail.empty() ? "null" : verify.detail) << "}]}";
@@ -1433,7 +1440,7 @@ void RunFilePathDeliveryCase(
            << ",\"output_read\":" << CaseLogger::Bool(outputRead)
            << ",\"output_consumer_id\":" << CaseLogger::Quote(ctx.state.output.consumer_id)
            << ",\"correlation_ok\":" << CaseLogger::Bool(correlationOk)
-           << ",\"output_url\":" << CaseLogger::Quote(ctx.state.output.url)
+           << ",\"output_url\":" << CaseLogger::Quote(ctx.state.output.http.url)
            << ",\"output_http_status\":" << outputHttpStatus
            << ",\"named_route_handoff_ok\":" << CaseLogger::Bool(namedRouteHandoffOk)
            << ",\"verify_ok\":" << CaseLogger::Bool(verifyOk)
@@ -1898,7 +1905,7 @@ void RunNegotiationCases(
             {
                 const cec::WorkflowOutput& output = contract.Value().outputs[i];
                 std::vector<std::string> expected = ExpectedTypeTransports(output.type);
-                bool ok = Sorted(expected) == Sorted(output.transports);
+                bool ok = Sorted(expected) == Sorted(TransportNames(output.transports));
 
                 CaseRecord rec;
                 rec.caseId = "parse-output-" + output.name;
@@ -1907,7 +1914,7 @@ void RunNegotiationCases(
                 rec.description = "/notch/parse must report the type->transport set for this connected output.";
                 rec.specRef = kSpecTypeAxis;
                 rec.expectedJson = "{\"type\":" + CaseLogger::Quote(output.type) + ",\"transports\":" + CaseLogger::Array(expected) + "}";
-                rec.actualJson = "{\"type\":" + CaseLogger::Quote(output.type) + ",\"transports\":" + CaseLogger::Array(output.transports) + "}";
+                rec.actualJson = "{\"type\":" + CaseLogger::Quote(output.type) + ",\"transports\":" + CaseLogger::Array(TransportNames(output.transports)) + "}";
                 rec.result = ok ? "pass" : "fail";
                 if (!ok)
                 {
@@ -2154,7 +2161,7 @@ void RunDeliveryCases(DeliveryContext& ctx)
     {
         std::string probeError;
         const bool probeOk = cec::SharedMemoryReader::Probe(
-            ctx.server.shared_memory_probe_name, ctx.server.shared_memory_probe_token, probeError);
+            ctx.server.shared_memory_probe.name, ctx.server.shared_memory_probe.token, probeError);
         CaseRecord probe;
         probe.caseId = "local.shm.reachability-probe";
         probe.title = "Shared-memory namespace probe";
@@ -2258,7 +2265,7 @@ MatrixSummary RunConformance(
              << ",\"minimum_client_protocol\":" << CaseLogger::Quote(server.minimum_client_protocol.ToString())
              << ",\"plugin_capabilities\":" << JoinCsv(server.capabilities.values)
              << ",\"tested_comfyui_refs\":" << JoinCsv(server.tested_comfyui_refs)
-             << ",\"output_transports\":" << JoinCsv(server.output_transports)
+             << ",\"output_transports\":" << JoinCsv(TransportNames(server.output_transports))
              << ",\"cuda_device_index\":" << server.cuda_device_index << "}";
         logger.Event(json.str());
     }

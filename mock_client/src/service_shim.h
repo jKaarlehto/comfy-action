@@ -17,29 +17,11 @@ public:
     virtual bool SendText(const std::string& message, std::string& error) = 0;
 };
 
-// Server facts from live GET /features (extension.notch). The shim parses these
-// directly: the vendorable client no longer reads /features — discovery is
-// Notch-service-owned, and the shim mirrors that service behavior for CI.
-struct ServerFacts
-{
-    ServerFacts();
+// Deployment policy uses the SDK's parsed protocol facts.
+using ServerFacts = ComfyExtensionClient::ServerFacts;
 
-    ComfyExtensionClient::Version plugin_version;
-    ComfyExtensionClient::Version protocol_version;
-    ComfyExtensionClient::VersionRange supports_protocol;
-    ComfyExtensionClient::Version minimum_client_protocol;
-    ComfyExtensionClient::CapabilitySet capabilities;
-    std::vector<std::string> tested_comfyui_refs;
-    std::vector<std::string> output_transports;
-    std::vector<std::string> named_disk_route_ids;
-    std::vector<std::string> workflow_sources;
-    std::string shared_memory_probe_name;
-    std::string shared_memory_probe_token;
-    int named_disk_route_revision;
-    int cuda_device_index;
-    int live_editor_default_timeout_ms;
-    int live_editor_max_timeout_ms;
-};
+std::vector<std::string> TransportNames(const std::vector<ComfyExtensionClient::OutputTransport>& transports);
+std::vector<ComfyExtensionClient::OutputTransport> TransportValues(const std::vector<std::string>& names);
 
 // Result of the Connect gate: discovery + protocol-range compatibility +
 // the feature-flags announce.

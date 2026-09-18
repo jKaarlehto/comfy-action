@@ -339,156 +339,6 @@ bool GetStringArrayField(const jsonxx::Object& object, const std::string& key, s
     return true;
 }
 
-// /features nests the plugin facts under data.extension.notch (or extension.notch).
-const jsonxx::Object* FindNotchFactsObject(const jsonxx::Object& root)
-{
-    const jsonxx::Object* factsRoot = &root;
-    if (root.has<jsonxx::Object>("data"))
-    {
-        factsRoot = &root.get<jsonxx::Object>("data");
-    }
-    if (factsRoot->has<jsonxx::Object>("extension"))
-    {
-        const jsonxx::Object& extension = factsRoot->get<jsonxx::Object>("extension");
-        if (extension.has<jsonxx::Object>("notch"))
-        {
-            return &extension.get<jsonxx::Object>("notch");
-        }
-    }
-    return factsRoot;
-}
-
-void GetNamedDiskRouteFields(
-    const jsonxx::Object& factsObject,
-    std::vector<std::string>& routeIds,
-    int& revision)
-{
-    routeIds.clear();
-    revision = 0;
-
-    if (!factsObject.has<jsonxx::Object>("named_disk_routes"))
-    {
-        GetStringArrayField(factsObject, "named_disk_route_ids", routeIds);
-        return;
-    }
-
-    const jsonxx::Object& routesObject = factsObject.get<jsonxx::Object>("named_disk_routes");
-    int64_t intValue = 0;
-    if (GetIntField(routesObject, "revision", intValue))
-    {
-        revision = static_cast<int>(intValue);
-    }
-
-    GetStringArrayField(routesObject, "route_ids", routeIds);
-    if (!routeIds.empty() || !routesObject.has<jsonxx::Array>("routes"))
-    {
-        return;
-    }
-
-    const jsonxx::Array& routes = routesObject.get<jsonxx::Array>("routes");
-    for (size_t i = 0; i < routes.size(); ++i)
-    {
-        if (routes.has<jsonxx::Object>(static_cast<unsigned int>(i)))
-        {
-            std::string routeId;
-            GetStringField(routes.get<jsonxx::Object>(static_cast<unsigned int>(i)), "named_route_id", routeId);
-            if (!routeId.empty())
-            {
-                routeIds.push_back(routeId);
-            }
-        }
-    }
-}
-
-void ParseLiveEditorFacts(
-    const jsonxx::Object& factsObject,
-    std::vector<std::string>& workflowSources,
-    int& defaultTimeoutMs,
-    int& maxTimeoutMs)
-{
-    workflowSources.clear();
-    defaultTimeoutMs = 0;
-    maxTimeoutMs = 0;
-
-    if (!factsObject.has<jsonxx::Object>("live_editor_snapshot"))
-    {
-        return;
-    }
-
-    const jsonxx::Object& liveEditor = factsObject.get<jsonxx::Object>("live_editor_snapshot");
-    GetStringArrayField(liveEditor, "workflow_sources", workflowSources);
-
-    int64_t intValue = 0;
-    if (GetIntField(liveEditor, "default_timeout_ms", intValue))
-    {
-        defaultTimeoutMs = static_cast<int>(intValue);
-    }
-    if (GetIntField(liveEditor, "max_timeout_ms", intValue))
-    {
-        maxTimeoutMs = static_cast<int>(intValue);
-    }
-}
-
-bool ParseServerFacts(const std::string& json, ServerFacts& facts, std::string& error)
-{
-    facts = ServerFacts();
-
-    jsonxx::Object root;
-    if (!ParseJsonObject(json, root))
-    {
-        error = "Server features response was not valid JSON";
-        return false;
-    }
-
-    const jsonxx::Object* factsObject = FindNotchFactsObject(root);
-
-    std::string stringValue;
-    if (GetStringField(*factsObject, "plugin_version", stringValue))
-    {
-        facts.plugin_version = cec::Version(stringValue);
-    }
-    if (GetStringField(*factsObject, "protocol_version", stringValue))
-    {
-        facts.protocol_version = cec::Version(stringValue);
-    }
-    if (GetStringField(*factsObject, "supports_protocol", stringValue))
-    {
-        facts.supports_protocol = cec::VersionRange(stringValue);
-    }
-    if (GetStringField(*factsObject, "minimum_client_protocol", stringValue))
-    {
-        facts.minimum_client_protocol = cec::Version(stringValue);
-    }
-    GetStringArrayField(*factsObject, "plugin_capabilities", facts.capabilities.values);
-    GetStringArrayField(*factsObject, "tested_comfyui_refs", facts.tested_comfyui_refs);
-
-    int64_t intValue = 0;
-    if (GetIntField(*factsObject, "cuda_device_index", intValue))
-    {
-        facts.cuda_device_index = static_cast<int>(intValue);
-    }
-    GetStringArrayField(*factsObject, "output_transports", facts.output_transports);
-    if (factsObject->has<jsonxx::Object>("shared_memory_probe"))
-    {
-        const jsonxx::Object& probe = factsObject->get<jsonxx::Object>("shared_memory_probe");
-        GetStringField(probe, "name", facts.shared_memory_probe_name);
-        GetStringField(probe, "token", facts.shared_memory_probe_token);
-    }
-    GetNamedDiskRouteFields(*factsObject, facts.named_disk_route_ids, facts.named_disk_route_revision);
-    ParseLiveEditorFacts(
-        *factsObject,
-        facts.workflow_sources,
-        facts.live_editor_default_timeout_ms,
-        facts.live_editor_max_timeout_ms);
-
-    if (facts.protocol_version.Empty() || facts.supports_protocol.Empty())
-    {
-        error = "Plugin/server features are missing extension.notch protocol fields";
-        return false;
-    }
-    return true;
-}
-
 std::vector<std::string> NormalizeTransportSet(const std::vector<std::string>& values)
 {
     std::vector<std::string> normalized;
@@ -543,12 +393,28 @@ cec::Error HttpStatusError(const cec::HttpResponse& response, const std::string&
 
 } // namespace
 
-ServerFacts::ServerFacts()
-    : named_disk_route_revision(0)
-    , cuda_device_index(-1)
-    , live_editor_default_timeout_ms(0)
-    , live_editor_max_timeout_ms(0)
+std::vector<std::string> TransportNames(const std::vector<cec::OutputTransport>& transports)
 {
+    std::vector<std::string> names;
+    for (size_t i = 0; i < transports.size(); ++i)
+    {
+        names.push_back(cec::OutputTransportName(transports[i]));
+    }
+    return names;
+}
+
+std::vector<cec::OutputTransport> TransportValues(const std::vector<std::string>& names)
+{
+    std::vector<cec::OutputTransport> transports;
+    for (size_t i = 0; i < names.size(); ++i)
+    {
+        const cec::OutputTransport transport = cec::OutputTransportFromName(names[i]);
+        if (transport != cec::OutputTransport::Unset)
+        {
+            transports.push_back(transport);
+        }
+    }
+    return transports;
 }
 
 RequiredFile::RequiredFile()
@@ -570,8 +436,8 @@ OutputTransportDecision SelectOutputTransport(const OutputTransportRequest& requ
 {
     OutputTransportDecision selection;
 
-    const std::vector<std::string> typeAllowed = NormalizeTransportSet(request.output.transports);
-    const std::vector<std::string> serverAvailable = NormalizeTransportSet(request.server.output_transports);
+    const std::vector<std::string> typeAllowed = NormalizeTransportSet(TransportNames(request.output.transports));
+    const std::vector<std::string> serverAvailable = NormalizeTransportSet(TransportNames(request.server.output_transports));
     const std::vector<std::string> clientReachable = NormalizeTransportSet(request.client_reachable_transports);
     const std::vector<std::string> typeAndServer = IntersectTransportSets(typeAllowed, serverAvailable);
     selection.usable_transports = IntersectTransportSets(typeAndServer, clientReachable);
@@ -623,29 +489,7 @@ ServiceShim::ServiceShim(
 
 cec::Result<ServerFacts> ServiceShim::Discover()
 {
-    cec::HttpRequest request;
-    request.method = "GET";
-    request.path = "/features";
-    request.content_type = "application/json";
-
-    cec::HttpResponse response;
-    std::string sendError;
-    if (!m_http.Send(request, response, sendError))
-    {
-        return cec::Result<ServerFacts>::Fail(sendError);
-    }
-    if (IsHttpError(response))
-    {
-        return cec::Result<ServerFacts>::Fail(HttpStatusError(response, "Server feature discovery failed"));
-    }
-
-    ServerFacts facts;
-    std::string parseError;
-    if (!ParseServerFacts(response.body, facts, parseError))
-    {
-        return cec::Result<ServerFacts>::Fail(parseError);
-    }
-    return cec::Result<ServerFacts>::Ok(facts);
+    return m_client.GetServerFacts();
 }
 
 cec::Result<Session> ServiceShim::Connect()
@@ -787,18 +631,18 @@ cec::Result<cec::JobHandle> ServiceShim::Submit(const cec::GenerateRequest& requ
 
 cec::Result<GeneratedResult> ServiceShim::FetchOutput(const cec::OutputReady& output) const
 {
-    if (output.transport != "http")
+    if (output.transport != cec::OutputTransport::Http)
     {
         return cec::Result<GeneratedResult>::Fail("FetchOutput only fetches http output artifacts");
     }
-    if (output.url.empty())
+    if (output.http.url.empty())
     {
         return cec::Result<GeneratedResult>::Fail("OutputReady.url is required for http output fetch");
     }
 
     cec::HttpRequest request;
     request.method = "GET";
-    request.path = output.url;
+    request.path = output.http.url;
 
     cec::HttpResponse response;
     std::string sendError;

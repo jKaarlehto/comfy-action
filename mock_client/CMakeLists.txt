@@ -40,7 +40,7 @@ find_package(CUDAToolkit QUIET)
 
 # Transport-agnostic contract logic. Depends only on the client interface, so it
 # can be reused and self-tested without the transport library. service_shim.cpp
-# parses /features and /notch/get-required-files with jsonxx (vendored inside the
+# parses /notch/get-required-files with jsonxx (vendored inside the
 # client checkout, compiled into the comfy_extension_client library), so the
 # matrix needs its include directory.
 add_library(notch_mock_matrix STATIC

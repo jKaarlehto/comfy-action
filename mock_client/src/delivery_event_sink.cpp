@@ -33,12 +33,12 @@ void DeliveryEventSink::OnEvent(const ComfyExtensionClient::ClientEvent& event)
             const ComfyExtensionClient::OutputReady& output = event.outputs[i];
             const bool outPromptOk = output.prompt_id.empty() || m_promptId.empty() || output.prompt_id == m_promptId;
             const bool consumerOk = output.consumer_id == m_consumerId || output.name == m_consumerId;
-            if (outPromptOk && consumerOk && output.transport == m_transport)
+            if (outPromptOk && consumerOk && ComfyExtensionClient::OutputTransportName(output.transport) == m_transport)
             {
                 m_state.output = output;
                 m_state.outputReady = true;
                 std::ostringstream fields;
-                fields << "\"transport\":" << CaseLogger::Quote(output.transport)
+                fields << "\"transport\":" << CaseLogger::Quote(ComfyExtensionClient::OutputTransportName(output.transport))
                        << ",\"consumer_id\":" << CaseLogger::Quote(output.consumer_id);
                 m_log.Action("event.output_ready", fields.str(), "ok");
             }
