@@ -26,6 +26,19 @@ namespace cec = ComfyExtensionClient;
 namespace
 {
 
+// Keep this action usable with SDKs predating the automatic updater.
+// Transport conformance must not install packages or restart its test host.
+template <typename Options>
+auto DisablePluginUpdates(Options& options, int) -> decltype(options.auto_update_plugin = false, void())
+{
+    options.auto_update_plugin = false;
+}
+
+template <typename Options>
+void DisablePluginUpdates(Options&, long)
+{
+}
+
 std::vector<std::string> Split(const std::string& csv)
 {
     std::vector<std::string> out;
@@ -614,8 +627,8 @@ std::string BuildRoundTripWorkflowJson(const std::string& inputType, const std::
     std::ostringstream json;
     json << "{"
          << "\"1\":{\"class_type\":\"NotchSingleInput\",\"inputs\":{"
-         << "\"key\":\"test_input\",\"type\":" << CaseLogger::Quote(inputType)
-         << ",\"frontend_state\":\"\"},\"_meta\":{\"title\":\"Notch Value Loader\"}},"
+         << "\"inputs_json\":" << CaseLogger::Quote("[{\"key\":\"test_input\",\"type\":" + CaseLogger::Quote(inputType) + "}]")
+         << "},\"_meta\":{\"title\":\"Notch Value Loader\"}},"
          << "\"2\":{\"class_type\":\"NotchOutputNode\",\"inputs\":{"
          << CaseLogger::Quote(slotName) << ":[\"1\",0]"
          << "},\"_meta\":{\"title\":\"Notch Output\"}}"
@@ -2221,6 +2234,7 @@ MatrixSummary RunConformance(
     DeliveryEventSink sink(liveState, facadeLog);
 
     cec::ClientOptions clientOptions;
+    DisablePluginUpdates(clientOptions, 0);
     clientOptions.client_id = options.clientId;
     clientOptions.http_transport = &http;
     clientOptions.websocket_transport = &ws;

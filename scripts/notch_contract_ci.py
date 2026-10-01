@@ -397,6 +397,7 @@ def compile_cpp_client(runner: CommandRunner, extension_dir: Path, workdir: Path
     if not exe.exists():
         raise RunnerError("C++ compile check executable was not produced")
     runner.run([str(exe)], log_name="cpp-compile.log")
+    runner.run(["ctest", "--test-dir", str(build_dir), "-C", "Release", "--output-on-failure"], log_name="cpp-compile.log")
 
 
 class MockClientBuildError(RunnerError):
